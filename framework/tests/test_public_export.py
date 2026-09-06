@@ -23,6 +23,8 @@ def test_public_export_is_independent_and_excludes_private_data(tmp_path):
     paths = [p.relative_to(output).as_posix() for p in output.rglob('*') if p.is_file()]
     assert 'framework/pyproject.toml' in paths
     assert 'framework/python/doppel/cli.py' in paths
+    assert 'framework/tests/conftest.py' in paths
+    assert (output / 'framework/tests/conftest.py').read_bytes() == (ROOT / 'framework/tests/conftest.py').read_bytes()
     assert 'android/sdk/build.gradle.kts' in paths
     assert 'android/developer-app/build.gradle.kts' in paths
     assert 'android/test-app/build.gradle.kts' in paths

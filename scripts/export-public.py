@@ -20,6 +20,7 @@ FILES = {
     '.github/workflows/verify-public.yml',
     '.gitignore', 'framework/pyproject.toml', 'framework/MANIFEST.in', 'framework/README.md', 'framework/LICENSE',
     'framework/NOTICE', 'framework/THIRD_PARTY_NOTICES.md',
+    'framework/tests/conftest.py',
     'android/build.gradle.kts', 'android/gradle.properties', 'android/gradlew',
     'android/gradlew.bat', 'android/gradle/wrapper/gradle-wrapper.jar',
     'android/gradle/wrapper/gradle-wrapper.properties',
