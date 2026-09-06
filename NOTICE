@@ -1,0 +1,10 @@
+Doppel public framework and Android SDK
+Copyright 2026 Doppel contributors
+
+Original public Doppel components are licensed under the Apache License 2.0.
+Third-party dependencies and the Gradle wrapper retain their original licenses.
+See THIRD_PARTY_NOTICES.md in the public repository for the dependency inventory,
+source references, redistribution scope and notices to preserve.
+
+No affiliation with or endorsement by DeepSeek, Android, Google, Gradle, WPS or
+other service and application owners is implied.

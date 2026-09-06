@@ -1,0 +1,42 @@
+Doppel Android speech runtime notices
+
+Vosk Android 0.3.75 (com.alphacephei:vosk-android)
+Copyright 2019-2021 Alpha Cephei Inc. and Vosk contributors.
+Licensed under Apache-2.0; see Apache-2.0.txt.
+https://github.com/alphacep/vosk-api
+
+Java Native Access 5.18.1 (net.java.dev.jna:jna)
+Doppel uses the Apache-2.0 option of JNA's dual license.
+See JNA-LICENSE.txt and Apache-2.0.txt.
+https://github.com/java-native-access/jna/tree/5.18.1
+JNA's native library includes libffi; see libffi-LICENSE.txt.
+
+Vosk's published Android native build uses these additional projects:
+- Kaldi (vosk-android branch): Apache-2.0, Apache-2.0.txt.
+  https://github.com/alphacep/kaldi/tree/vosk-android
+- OpenFst: Apache-2.0, Apache-2.0.txt.
+  https://github.com/alphacep/openfst
+- OpenBLAS 0.3.20: BSD-3-Clause, OpenBLAS-LICENSE.txt.
+  https://github.com/OpenMathLib/OpenBLAS/tree/v0.3.20
+- CLAPACK 3.2.1: BSD-3-Clause, CLAPACK-COPYING.txt.
+  https://github.com/alphacep/clapack/tree/v3.2.1
+- libf2c: permissive AT&T/Lucent/Bellcore notice, F2C-NOTICE.txt.
+- Android NDK C++ runtime: libcxx-LICENSE.txt, libcxxabi-LICENSE.txt,
+  libunwind-LICENSE.txt, including Apache-2.0 WITH LLVM-exception and
+  the reproduced legacy notices. Texts are from LLVM 18.1.8.
+  https://github.com/llvm/llvm-project/tree/llvmorg-18.1.8
+
+The upstream AAR contains native binaries but no complete build provenance or
+transitive NOTICE inventory. The list above follows its published build script;
+it does not identify the exact source revision of every prebuilt object.
+Preserve these texts with binary redistributions.
+
+Optional Chinese speech model: vosk-model-small-cn-0.22.
+Published by Alpha Cephei under Apache-2.0 in the official model listing:
+https://alphacephei.com/vosk/models
+https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip
+Verified archive SHA-256:
+3af8b0e7e0f835ae9d414ce5df580237a3cfb08d586c9fbbb0f7ff29ad5b14ba
+The archive is downloaded separately and is not bundled in Doppel source or APKs.
+See Apache-2.0.txt for its license. Provider-hosted model updates require a new
+integrity and license check.

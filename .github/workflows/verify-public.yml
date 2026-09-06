@@ -1,0 +1,53 @@
+name: Public Framework and Android
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: framework/pyproject.toml
+      - name: Install Public Package
+        run: python -m pip install -e "./framework[test]"
+      - name: Run Local Fixtures
+        working-directory: framework
+        run: python -m pytest -q
+      - name: Build Wheel and Source Distribution
+        run: python -m pip install build && python -m build framework
+
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Android SDK Components
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Build Public Android Modules
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon :sdk:testDebugUnitTest :developer-app:assembleDebug :test-app:assembleDebug
