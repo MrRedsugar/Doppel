@@ -58,3 +58,21 @@ def test_export_rejects_secret_in_public_source_without_partial_output(tmp_path)
     with pytest.raises(ValueError, match='secret'):
         module.export_public(fixture, public)
     assert not public.exists()
+
+
+@pytest.mark.parametrize("source_text", [
+    "from doppel_product.services import Services\n",
+    "import doppel_product\n",
+    "PACKAGE = 'dev.doppel.app'\n",
+    "LOGIN = '/v1/auth/login'\n",
+    "LOGIN = '/v1/auth/code'\n",
+])
+def test_export_still_rejects_private_product_dependencies(tmp_path, source_text):
+    module = exporter()
+    source, output = tmp_path / 'source', tmp_path / 'public'
+    path = source / 'framework/python/doppel/cli.py'
+    path.parent.mkdir(parents=True)
+    path.write_text(source_text, encoding='utf-8')
+    with pytest.raises(ValueError, match='Private product reference'):
+        module.export_public(source, output)
+    assert not output.exists()

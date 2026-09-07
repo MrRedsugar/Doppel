@@ -10,6 +10,10 @@
         <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.documents" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/document_paths" /></provider>
         <activity android:name=".VoiceActivity" android:exported="false" android:taskAffinity="${applicationId}.voice" android:excludeFromRecents="true" android:theme="@android:style/Theme.Material.Light.Dialog.NoActionBar" />
         <activity android:name=".SpeechSettingsActivity" android:exported="false" />
+        <activity android:name=".LoginSettingsActivity" android:exported="false" />
+        <service android:name=".LoginNotificationService" android:label="Doppel 登录验证码" android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" android:exported="true">
+            <intent-filter><action android:name="android.service.notification.NotificationListenerService" /></intent-filter>
+        </service>
         <service android:name=".DoppelAccessibilityService" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE" android:exported="true" android:label="Doppel 屏幕操作">
             <intent-filter><action android:name="android.accessibilityservice.AccessibilityService" /></intent-filter>
             <meta-data android:name="android.accessibilityservice" android:resource="@xml/accessibility" />

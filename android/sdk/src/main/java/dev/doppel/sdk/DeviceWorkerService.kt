@@ -44,12 +44,12 @@ class DeviceWorkerService : Service(), DeviceWorker {
         return START_NOT_STICKY
     }
     override fun pause() {
-        paused = true; DoppelAccessibilityService.instance?.setTouchGuard(false); update("已暂停")
+        paused = true; DoppelAccessibilityService.instance?.setTouchGuard(false); DoppelAccessibilityService.instance?.stopActionFeedback(); LoginAssist.clearSession(); update("已暂停")
         val runId = gateway.prefs.getString("active_run", "").orEmpty()
         if (runId.isNotEmpty()) Thread { try { gateway.request("POST", "/runs/$runId/pause", JSONObject()) } catch (_: Exception) {} }.start()
     }
     override fun resume() { paused = false; update("等待任务") }
-    override fun cancel() { paused = true; DoppelAccessibilityService.instance?.setTouchGuard(false); update("已停止") }
+    override fun cancel() { paused = true; DoppelAccessibilityService.instance?.setTouchGuard(false); DoppelAccessibilityService.instance?.stopActionFeedback(); LoginAssist.clearSession(); update("已停止") }
     private fun loop() {
         val results = try { ResultStore(this) } catch (_: Exception) { update("命令存储不可用，已停止"); return }
         val ledger = results.ledger
@@ -77,12 +77,14 @@ class DeviceWorkerService : Service(), DeviceWorker {
                     val active = gateway.request("GET", "/runs/$activeRun")
                     val running = active.optString("status") == "running"
                     val service = DoppelAccessibilityService.instance
+                    if (!running) service?.stopActionFeedback()
                     val outsideClient = try { service?.foregroundPackage() != packageName } catch (_: Exception) { false }
                     service?.setTouchGuard(running && outsideClient && gateway.prefs.getBoolean("touch_pause", true))
                     if (active.optString("status") == "paused") { cancel(); continue }
                     if (active.optString("status") in setOf("cancelled", "completed", "failed")) {
                         gateway.prefs.edit().remove("active_run").apply()
                         service?.setTouchGuard(false)
+                        LoginAssist.clearSession()
                         update("等待任务")
                     }
                 }
@@ -111,9 +113,14 @@ class DeviceWorkerService : Service(), DeviceWorker {
                 }
                 if (!ledger.finish(id, result.toString())) { paused = true; update("结果保存失败，已暂停"); continue }
                 gateway.request("POST", "/devices/$device/results", result)
+                if (result.optJSONObject("data")?.optString("human_takeover") == "verification") {
+                    paused = true
+                    DoppelAccessibilityService.instance?.setTouchGuard(false)
+                    DoppelAccessibilityService.instance?.stopActionFeedback()
+                }
                 if (!results.acknowledge(id)) { paused = true; update("本机结果清理失败，已暂停"); continue }
                 update(if (paused) "已暂停" else "等待任务")
-            } catch (_: Exception) { DoppelAccessibilityService.instance?.setTouchGuard(false); update(if (paused) "已暂停" else "连接中断，等待重连"); Thread.sleep(2000) }
+            } catch (_: Exception) { DoppelAccessibilityService.instance?.setTouchGuard(false); DoppelAccessibilityService.instance?.stopActionFeedback(); update(if (paused) "已暂停" else "连接中断，等待重连"); Thread.sleep(2000) }
         }
         results.close()
     }
@@ -153,7 +160,7 @@ class DeviceWorkerService : Service(), DeviceWorker {
         try { manager.addView(button, params); overlay = button } catch (_: Exception) { update("悬浮窗不可用") }
     }
     override fun onDestroy() {
-        alive = false; paused = true; DoppelAccessibilityService.instance?.setTouchGuard(false); instance = null; handler.removeCallbacksAndMessages(null)
+        alive = false; paused = true; DoppelAccessibilityService.instance?.setTouchGuard(false); DoppelAccessibilityService.instance?.stopActionFeedback(); LoginAssist.clearSession(); instance = null; handler.removeCallbacksAndMessages(null)
         overlay?.let { getSystemService(WindowManager::class.java).removeView(it) }
         executor.shutdown(); super.onDestroy()
     }

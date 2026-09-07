@@ -5,6 +5,12 @@ uses stable targets, executes authorized actions and checks results. The public
 package includes a standalone developer gateway, Android developer frontend,
 isolated test app, MCP extensions and batch workbook tools.
 
+The alpha.2 Android workspace adds visible tap/long-press/scroll feedback,
+explicit verification takeover, and encrypted device-local phone profiles with
+one-use SMS notification assistance. The developer usage page shows unlimited
+test points and retained actual token usage; provider charges still apply.
+See [Interaction and Login Assistance](docs/developer/interaction-login.md).
+
 ```sh
 python -m pip install -e './framework[test]'
 doppel init --data-dir .local/developer
@@ -29,6 +35,14 @@ explicit Android grants. Payment is always manual; avoid testing real social
 messages. Simulated test-app results do not establish real-app compatibility.
 
 ## Observed verification
+
+For alpha.2, SDK tests cover 29 cases. LDPlayer instrumentation passed six
+device cases, including synthetic SMS login, actual tap/long-press/scroll cursor
+pixels, CAPTCHA takeover, payment boundaries, stable targets, and result privacy.
+Two additional broker-dependent voice/worker tests were skipped because their
+test-broker prerequisite was absent. Normal-width and 320dp Android layouts were
+visually checked. Real carrier SMS and new live-model business runs were not
+revalidated for alpha.2. The business measurements below belong to alpha.1.
 
 Selected runs on 2026-09-07 used a live model with independent output assertions.
 Numbers describe those runs, not a latency or token budget guarantee.
@@ -74,6 +88,7 @@ passed with 16 SDK JVM tests. These local fixtures do not call paid model servic
 - [Extensions](docs/developer/extensions.md)
 - [Documents](docs/developer/documents.md)
 - [Data Retention](docs/developer/data-retention.md)
+- [Interaction and Login Assistance](docs/developer/interaction-login.md)
 - [Export and Release](docs/developer/open-source.md)
 
 The links above are documentation topics under docs/developer in this repository.

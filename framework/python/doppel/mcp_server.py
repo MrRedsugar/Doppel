@@ -48,9 +48,21 @@ async def finish_task(outcome: Literal["completed", "failed"], summary: str, evi
 
 
 @server.tool()
-async def act(action: Literal["launch", "tap", "type", "scroll", "back", "home", "wait", "open_document"], target: str | None = None, screen_id: str | None = None, text: str | None = None, package_name: str | None = None, direction: Literal["up", "down", "left", "right"] | None = None, duration_ms: int | None = None, uri: str | None = None) -> dict:
-    """Execute one device action, then inspect the result. Tap/type require current screen_id and target. Payment stays manual."""
+async def act(action: Literal["launch", "tap", "long_press", "type", "scroll", "back", "home", "wait", "open_document"], target: str | None = None, screen_id: str | None = None, text: str | None = None, package_name: str | None = None, direction: Literal["up", "down", "left", "right"] | None = None, duration_ms: int | None = None, uri: str | None = None) -> dict:
+    """Execute one device action, then inspect the result. Tap/long_press/type require current screen_id and target. Long press requires a long_press node and uses Android's action duration. Payment stays manual."""
     return await invoke("act", locals())
+
+
+@server.tool()
+async def login_phone(target: str, screen_id: str) -> dict:
+    """Fill an opted-in phone number from the device's local app profile. No phone value is sent to the host or model."""
+    return await invoke("login_phone", {"target": target, "screen_id": screen_id})
+
+
+@server.tool()
+async def login_code(target: str, screen_id: str) -> dict:
+    """Fill a fresh one-use SMS code matched locally to this task and app. Never request or provide the code as text."""
+    return await invoke("login_code", {"target": target, "screen_id": screen_id})
 
 
 @server.tool()

@@ -11,7 +11,7 @@ from .models import Run
 from .model_context import compact_screen_history
 from .runtime import TERMINAL
 
-TOOL_NAMES = {"observe", "act", "ask_user", "list_apps", "describe_screen", "list_skills", "read_skill", "read_skill_resource", "list_documents", "inspect_document", "transform_document", "read_memory", "save_memory", "list_extensions", "call_extension", "finish_task"}
+TOOL_NAMES = {"observe", "act", "login_phone", "login_code", "ask_user", "list_apps", "describe_screen", "list_skills", "read_skill", "read_skill_resource", "list_documents", "inspect_document", "transform_document", "read_memory", "save_memory", "list_extensions", "call_extension", "finish_task"}
 
 
 def estimate_input(payload):
@@ -87,7 +87,7 @@ async def _call_model(runtime, run_id, body, *, auxiliary=False):
     expected = "deepseek-v4-flash-vision-exp" if auxiliary else runtime.config.model
     if body.get("model", expected) != expected:
         raise HTTPException(403, "Model is outside this task configuration")
-    while run.status in {"paused", "awaiting_approval", "awaiting_input"}:
+    while run.status not in TERMINAL and (run.status in {"paused", "awaiting_approval", "awaiting_input"} or run.requires_fresh_observation):
         await asyncio.sleep(0.2)
         run = Run.model_validate_json(runtime._row(run_id)["payload"])
     if run.status in TERMINAL:

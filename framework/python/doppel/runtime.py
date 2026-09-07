@@ -161,6 +161,10 @@ class DoppelRuntime:
             run = Run.model_validate_json(row["payload"])
             if run.status != "paused":
                 raise Conflict("Task is not paused")
+            if run.pending_request and run.pending_request.get("reason") in {"verification", "login"}:
+                run.pending_request = None
+                run.requires_fresh_observation = True
+                db.execute("UPDATE runs SET observation=NULL WHERE id=?", (run_id,))
             run.status = "awaiting_approval" if run.pending_request and run.pending_request["kind"] == "approval" else "awaiting_input" if run.pending_request else "running"
             run.message = "已继续"
             self._update(db, run)
@@ -185,6 +189,20 @@ class DoppelRuntime:
         value = self._row(run_id)["observation"]
         return Observation.model_validate_json(value) if value else None
 
+    def _pause_for_takeover(self, db, run, reason):
+        run = Run.model_validate_json(db.execute("SELECT payload FROM runs WHERE id=?", (run.id,)).fetchone()["payload"])
+        if run.status in TERMINAL:
+            return run
+        if run.status == "paused" and run.pending_request and run.pending_request.get("reason") == reason:
+            return run
+        message = "请在手机上手动完成安全验证，再点击继续。" if reason == "verification" else "请在手机上完成登录设置或手动登录，再点击继续。"
+        run.status, run.message = "paused", message
+        run.requires_fresh_observation = True
+        run.pending_request = {"id": secrets.token_hex(16), "kind": "input", "reason": reason,
+                               "message": message, "manual_only": True}
+        self._update(db, run, "human_takeover")
+        return run
+
     def queue_command(self, run_id, kind, **fields):
         command = Command(id=secrets.token_hex(16), run_id=run_id, kind=kind, **fields)
         with self.store.transaction() as db:
@@ -194,13 +212,15 @@ class DoppelRuntime:
             run = Run.model_validate_json(row["payload"])
             if run.status != "running":
                 raise Conflict("Task is not running")
+            if run.requires_fresh_observation and kind not in {"observe", "screenshot"}:
+                raise Conflict("A fresh observation is required after human takeover")
             if db.execute("SELECT 1 FROM commands WHERE run_id=? AND result IS NULL", (run_id,)).fetchone():
                 raise Conflict("Wait for the previous device command")
             observation = Observation.model_validate_json(row["observation"]) if row["observation"] else None
             if run.allowed_packages:
                 if kind == "launch" and command.package_name not in run.allowed_packages:
                     raise PermissionDenied("Application is outside this task's authorized packages")
-                if kind in {"tap", "type", "scroll", "back"} and (observation is None or observation.package_name not in run.allowed_packages):
+                if kind in {"tap", "long_press", "type", "login_phone", "login_code", "scroll", "back"} and (observation is None or observation.package_name not in run.allowed_packages):
                     error = ScopeDenied if observation is not None else PermissionDenied
                     raise error("Current screen is outside this task's authorized packages")
                 if kind == "open_document":
@@ -211,11 +231,15 @@ class DoppelRuntime:
             if verdict.decision == "deny":
                 raise Conflict(verdict.reason)
             if verdict.decision == "manual":
-                run.status = "awaiting_input"
-                run.message = verdict.reason
-                run.pending_request = {"id": command.id, "kind": "input", "message": verdict.reason, "manual_only": True}
-                self._update(db, run)
-                result = CommandResult(command_id=command.id, run_id=run.id, status="blocked", message=verdict.reason)
+                if verdict.human_takeover:
+                    self._pause_for_takeover(db, run, verdict.human_takeover)
+                else:
+                    run.status = "awaiting_input"
+                    run.message = verdict.reason
+                    run.pending_request = {"id": command.id, "kind": "input", "message": verdict.reason, "manual_only": True}
+                    self._update(db, run)
+                result = CommandResult(command_id=command.id, run_id=run.id, status="blocked", message=verdict.reason,
+                                       data={"human_takeover": verdict.human_takeover} if verdict.human_takeover else {})
                 db.execute("INSERT INTO commands VALUES(?,?,?,?,?,?)", (command.id, run_id, command.model_dump_json(), "finished", result.model_dump_json(), utc_now()))
             else:
                 state = "held" if verdict.decision == "approve" else "queued"
@@ -256,6 +280,16 @@ class DoppelRuntime:
             db.execute("UPDATE commands SET state='finished',result=? WHERE id=?", (result.model_dump_json(), result.command_id))
             if result.observation:
                 db.execute("UPDATE runs SET observation=? WHERE id=?", (result.observation.model_dump_json(), result.run_id))
+            run_row = db.execute("SELECT payload FROM runs WHERE id=?", (result.run_id,)).fetchone()
+            run = Run.model_validate_json(run_row["payload"])
+            reason = result.data.get("human_takeover") if result.status == "blocked" else None
+            if self.policy.requires_verification(result.observation):
+                reason = "verification"
+            if reason in ("verification", "login"):
+                self._pause_for_takeover(db, run, reason)
+            elif run.status == "running" and run.requires_fresh_observation and result.status == "ok" and result.observation and json.loads(row["payload"])["kind"] in {"observe", "screenshot"}:
+                run.requires_fresh_observation = False
+                self._update(db, run, "fresh_observation")
             self.store.event(db, result.run_id, "command_result", result.message or result.status, {"command_id": result.command_id, "status": result.status})
 
     def command_result(self, command_id):
@@ -316,7 +350,7 @@ class DoppelRuntime:
         while True:
             result = self.command_result(command.id)
             if result is not None:
-                return result
+                return await self._resolve_takeover(run_id, result)
             run = Run.model_validate_json(self._row(run_id)["payload"])
             if run.status in TERMINAL:
                 self.set_status(run_id, run.status, run.message)
@@ -330,6 +364,33 @@ class DoppelRuntime:
                 self.set_status(run_id, "failed", "设备未及时返回执行结果，任务已停止以避免重复操作")
                 return self.command_result(command.id)
             await asyncio.sleep(0.1)
+
+    async def _resolve_takeover(self, run_id, result):
+        run = Run.model_validate_json(self._row(run_id)["payload"])
+        reason = result.data.get("human_takeover") if result.status == "blocked" else None
+        if self.policy.requires_verification(result.observation):
+            reason = "verification"
+        reason = reason or (run.pending_request or {}).get("reason")
+        if reason not in ("verification", "login"):
+            return result
+        while True:
+            while run.status == "paused":
+                await asyncio.sleep(0.2)
+                run = Run.model_validate_json(self._row(run_id)["payload"])
+            if run.status in TERMINAL:
+                return result.model_copy(update={"status": "cancelled", "observation": None,
+                                                 "message": "Task ended during human takeover", "data": {}})
+            fresh = await self.perform(run_id, "observe")
+            run = Run.model_validate_json(self._row(run_id)["payload"])
+            if run.status in TERMINAL:
+                continue
+            if fresh.observation and not run.requires_fresh_observation:
+                return result.model_copy(update={"status": "blocked", "observation": fresh.observation,
+                                                 "message": "Human takeover finished. Inspect the fresh screen; the refused action was not replayed.",
+                                                 "data": {"human_takeover": reason, "resumed": True}})
+            # A failed refresh needs another explicit continuation, never an automatic retry.
+            with self.store.transaction() as db:
+                run = self._pause_for_takeover(db, run, reason)
 
     def start_run(self, run_id):
         existing = self.tasks.get(run_id)

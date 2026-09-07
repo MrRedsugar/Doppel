@@ -50,6 +50,8 @@ def create_internal_router(runtime):
             raise Conflict("Resolve the pending task request before calling another tool")
         if not isinstance(name, str) or not isinstance(args, dict):
             raise HTTPException(422, "Invalid tool request")
+        if run.requires_fresh_observation and name not in {"observe", "list_apps", "describe_screen"}:
+            raise Conflict("Observe the fresh screen after human takeover before using another tool")
         try:
             if name == "finish_task":
                 answer = finish_task(runtime, run_id, args.get("outcome"), args.get("summary"), args.get("evidence_ids", []))
@@ -107,16 +109,29 @@ def create_internal_router(runtime):
             return result.model_dump(exclude_none=True)
         if name == "act":
             kind = args.pop("action", None)
-            if kind not in {"launch", "tap", "type", "scroll", "back", "home", "wait", "open_document"}:
+            if kind not in {"launch", "tap", "long_press", "type", "scroll", "back", "home", "wait", "open_document"}:
                 raise HTTPException(422, "Unsupported device action")
             fields = {key: value for key, value in args.items() if value is not None}
             result = await runtime.perform(run_id, kind, **fields)
             answer = {"status": result.status, "message": result.message}
+            if result.data.get("human_takeover"):
+                answer["human_takeover"] = result.data["human_takeover"]
             if result.status == "stale":
                 answer["error"] = "stale_target"
                 answer["message"] += " 目标未执行；动态界面上重复同一目标可能持续过期。重新评估界面；可在适当情况下使用 back 或 ask_user，不要盲目重复。"
             if result.observation:
                 answer["screen"] = compact_observation(result.observation)
+            return answer
+        if name in {"login_phone", "login_code"}:
+            if set(args) != {"target", "screen_id"}:
+                raise HTTPException(422, "Local login requires only target and screen_id")
+            observation = runtime.observation(run_id)
+            if observation is None:
+                raise Conflict("Observe the current application before local login")
+            result = await runtime.perform(run_id, name, target=args["target"], screen_id=args["screen_id"], package_name=observation.package_name)
+            answer = {"status": result.status, "message": "Local login action completed" if result.status == "ok" else "Local login requires user attention"}
+            if result.data.get("human_takeover"):
+                answer["human_takeover"] = result.data["human_takeover"]
             return answer
         if name == "list_apps":
             query = args.get("query", "")

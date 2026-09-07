@@ -28,21 +28,31 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
     private var latestSnapshot: TargetScreenSnapshot? = null
     @Volatile private var navigationGeneration = 0
     private var touchGuard: View? = null
+    private val feedback by lazy { ActionFeedbackOverlay(this) }
+    private val actionGeneration = java.util.concurrent.atomic.AtomicLong()
+    private val sensitiveFingerprintSalt = java.util.UUID.randomUUID().toString()
+    private val feedbackSettingsListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
+        if (key == "action_feedback" && !prefs.getBoolean(key, true)) stopActionFeedback()
+    }
+    @Volatile private var codeFieldVisible = false
+    @Volatile private var phoneFieldPopulated = false
+    val feedbackVisible: Boolean get() = feedback.visible
     @Volatile var guardVisible = false
         private set
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    override fun onServiceConnected() { instance = this }
-    override fun onDestroy() { setTouchGuard(false); targetHistory.clear(); instance = null; super.onDestroy() }
+    override fun onServiceConnected() { instance = this; getSharedPreferences("doppel", MODE_PRIVATE).registerOnSharedPreferenceChangeListener(feedbackSettingsListener) }
+    override fun onDestroy() { getSharedPreferences("doppel", MODE_PRIVATE).unregisterOnSharedPreferenceChangeListener(feedbackSettingsListener); stopActionFeedback(); LoginAssist.clearSession(); setTouchGuard(false); targetHistory.clear(); instance = null; super.onDestroy() }
     override fun onInterrupt() { DeviceWorkerService.instance?.pause() }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) navigationGeneration++
-        if (event?.eventType == AccessibilityEvent.TYPE_TOUCH_INTERACTION_START) { navigationGeneration++; targetHistory.clear(); DeviceWorkerService.instance?.pause() }
+        if (event?.eventType == AccessibilityEvent.TYPE_TOUCH_INTERACTION_START) { navigationGeneration++; targetHistory.clear(); stopActionFeedback(); DeviceWorkerService.instance?.pause() }
     }
     private fun activeRoot(): AccessibilityNodeInfo? =
         windows.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive }?.root
             ?: windows.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isFocused }?.root
             ?: rootInActiveWindow
     fun foregroundPackage(): String = activeRoot()?.packageName?.toString().orEmpty()
+    fun stopActionFeedback() { actionGeneration.incrementAndGet(); feedback.clear() }
     @Synchronized fun clearObservationHistory() { targetHistory.clear(); refs.clear(); latestSnapshot = null }
     fun setTouchGuard(enabled: Boolean) {
         mainHandler.post {
@@ -68,7 +78,12 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
         refs.clear()
         val generation = navigationGeneration
         val root = activeRoot() ?: throw IllegalStateException("无法读取当前屏幕")
+        val pkg = root.packageName?.toString().orEmpty()
+        val privateSettings = pkg == packageName && LoginAssist.settingsVisible
+        codeFieldVisible = false
+        phoneFieldPopulated = false
         val nodes = JSONArray()
+        val hiddenInputState = StringBuilder()
         val targetNodes = mutableListOf<TargetNodeSnapshot>()
         var complete = true
         var characters = 0
@@ -76,26 +91,43 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
             if (!node.isVisibleToUser) return
             if (depth > 30 || nodes.length() >= 300 || characters >= 24000) { complete = false; return }
             val rect = Rect(); node.getBoundsInScreen(rect)
-            val text = if (node.isPassword) "" else node.text?.toString().orEmpty().take(400)
-            val description = if (node.isPassword) "" else node.contentDescription?.toString().orEmpty().take(400)
+            val hint = node.hintText?.toString().orEmpty()
+            val inputLabel = "$hint ${node.contentDescription?.toString().orEmpty()} ${node.viewIdResourceName.orEmpty()}"
+            val otpInput = node.isEditable && Policy.codeInput(inputLabel)
+            val phoneInput = node.isEditable && Policy.phoneInput(inputLabel)
+            val loginInput = otpInput || phoneInput
+            if (otpInput) codeFieldVisible = true
+            if (phoneInput && !node.text.isNullOrBlank()) phoneFieldPopulated = true
+            val hiddenInput = node.isPassword || privateSettings && node.isEditable
+            val text = if (hiddenInput || loginInput) "" else LoginAssist.redact(pkg, node.text?.toString().orEmpty()).take(400)
+            val redactedDescription = LoginAssist.redact(pkg, node.contentDescription?.toString().orEmpty()).let { if (loginInput) Policy.redactLoginLabel(it) else it }
+            val description = when {
+                hiddenInput -> ""
+                otpInput && !Policy.codeInput(redactedDescription) -> "登录验证码"
+                phoneInput && !Policy.phoneInput(redactedDescription) -> "手机号"
+                else -> redactedDescription.take(400)
+            }
             characters += text.length + description.length
             val id = "n" + path
+            if (hiddenInput || loginInput) {
+                // Preserve freshness without publishing a brute-forceable digest of a short OTP.
+                hiddenInputState.append(id).append(':').append(Policy.hash("$sensitiveFingerprintSalt|${node.text?.toString().orEmpty()}|${node.contentDescription?.toString().orEmpty()}|$hint"))
+            }
             refs[id] = node
             targetNodes.add(TargetNodeSnapshot(id, listOf(rect.left, rect.top, rect.right, rect.bottom), text, description,
-                if (node.isPassword) "" else node.hintText?.toString().orEmpty().take(400), node.className?.toString().orEmpty(),
+                if (hiddenInput) "" else LoginAssist.redact(pkg, hint).let { if (loginInput) Policy.redactLoginLabel(it) else it }.take(400), node.className?.toString().orEmpty(),
                 node.viewIdResourceName.orEmpty(), node.isClickable, node.isEditable, node.isEnabled, node.isPassword, node.isScrollable, node.childCount))
             nodes.put(JSONObject().put("id", id).put("text", text).put("description", description)
-                .put("role", if (node.isEditable) "input" else if (node.isClickable) "button" else node.className?.toString().orEmpty())
+                .put("role", if (node.isEditable) "input" else if (node.isClickable || node.isLongClickable) "button" else node.className?.toString().orEmpty())
                 .put("bounds", JSONArray(listOf(rect.left, rect.top, rect.right, rect.bottom)))
-                .put("clickable", node.isClickable).put("editable", node.isEditable).put("enabled", node.isEnabled)
+                .put("clickable", node.isClickable).put("long_clickable", node.isLongClickable).put("editable", node.isEditable).put("enabled", node.isEnabled)
                 .put("scrollable", node.isScrollable).put("password", node.isPassword).put("resource_id", node.viewIdResourceName.orEmpty()))
             if (node.childCount > 300) complete = false
             for (i in 0 until minOf(node.childCount, 300)) node.getChild(i)?.let { walk(it, "${path}_$i", depth + 1) }
         }
         walk(root, "0", 0)
         val metrics = resources.displayMetrics
-        val pkg = root.packageName?.toString().orEmpty()
-        val screenId = Policy.hash("$pkg|${root.windowId}|$generation|${metrics.widthPixels}|${metrics.heightPixels}|$nodes")
+        val screenId = Policy.hash("$pkg|${root.windowId}|$generation|${metrics.widthPixels}|${metrics.heightPixels}|$nodes|$hiddenInputState")
         val snapshot = TargetScreenSnapshot(screenId, pkg, root.windowId, generation, metrics.widthPixels, metrics.heightPixels,
             android.os.SystemClock.elapsedRealtime(), targetNodes.toList(), complete && generation == navigationGeneration)
         latestSnapshot = snapshot; targetHistory.remember(snapshot)
@@ -108,6 +140,7 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
             JSONObject().put("command_id", command.getString("id")).put("run_id", command.getString("run_id"))
                 .put("status", status).put("message", message).put("observation", observation ?: JSONObject.NULL).put("data", data)
         try {
+            val executionGeneration = actionGeneration.get()
             val kind = command.getString("kind")
             if (kind == "screenshot") return screenshot(command)
             if (kind == "observe") {
@@ -126,8 +159,27 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                 return result("ok", observation = observation, data = JSONObject().put("apps", apps))
             }
             if (kind == "wait") { Thread.sleep(command.optLong("duration_ms", 500).coerceIn(0, 5000)); return result("ok", observation = observe()) }
-            if (kind in setOf("tap", "type", "scroll")) {
-                val fresh = observe()
+            val mutation = kind in setOf("tap", "long_press", "type", "login_phone", "login_code", "scroll", "back", "home", "launch", "open_document")
+            val current = if (mutation) observe() else null
+            if (current != null) {
+                if (LoginAssist.settingsVisible && current.optString("package_name") == packageName) {
+                    stopActionFeedback(); setTouchGuard(false); targetHistory.clear()
+                    return result("blocked", "本机登录资料只能由用户编辑", current, JSONObject().put("human_takeover", "login"))
+                }
+                val nodes = current.getJSONArray("nodes")
+                val verification = (0 until nodes.length()).any { index ->
+                    val node = nodes.getJSONObject(index)
+                    listOf(node.optString("text"), node.optString("description")).any { label ->
+                        Policy.verificationLabel(label, node.optBoolean("clickable") || node.optBoolean("long_clickable") || node.optBoolean("editable"))
+                    }
+                }
+                if (verification) {
+                    stopActionFeedback(); setTouchGuard(false); targetHistory.clear()
+                    return result("blocked", "安全验证需要人工完成，请完成后明确继续", current, JSONObject().put("human_takeover", "verification"))
+                }
+            }
+            if (kind in setOf("tap", "long_press", "type", "login_phone", "login_code", "scroll")) {
+                val fresh = current!!
                 val reference = command.optString("target")
                 val resolved = if (reference.isNotEmpty() && reference != "null") reference else if (kind == "scroll") refs.entries.firstOrNull { it.value.isScrollable }?.key.orEmpty() else ""
                 val node = refs[resolved]
@@ -140,7 +192,9 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                 val snapshot = latestSnapshot
                 if (snapshot == null || snapshot.navigationGeneration != navigationGeneration) return result("stale", "页面导航已变化，请重新观察", fresh)
                 val expected = command.optString("screen_id")
-                val stable = expected != snapshot.screenId && targetHistory.revalidates(expected, snapshot, resolved, kind)
+                val privateInputLabel = "${node?.hintText?.toString().orEmpty()} ${node?.contentDescription?.toString().orEmpty()} ${node?.viewIdResourceName.orEmpty()}"
+                val privateInput = node != null && (node.isPassword || Policy.codeInput(privateInputLabel) || Policy.phoneInput(privateInputLabel))
+                val stable = expected != snapshot.screenId && !(kind == "type" && privateInput) && targetHistory.revalidates(expected, snapshot, resolved, kind)
                 val verdict = Policy.validate(kind, if (stable) snapshot.screenId else expected, snapshot.screenId, target)
                 if (verdict != "ok") return result(verdict, if (verdict == "stale") "页面或目标已变化，请重新观察" else "支付或敏感输入必须由用户接管", fresh)
                 // Child labels and ancestor labels also count: an unlabelled icon cannot bypass a payment button.
@@ -153,22 +207,42 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                 val paymentContext = (0 until nodes.length()).any { Regex("收银台|支付密码|确认付款|确认支付|cashier|checkout|payment", RegexOption.IGNORE_CASE).containsMatchIn(nodes.getJSONObject(it).optString("text") + nodes.getJSONObject(it).optString("description")) }
                 if (kind != "scroll" && paymentContext && Regex("确认|确定|继续|提交|完成|confirm|continue|submit|done", RegexOption.IGNORE_CASE).containsMatchIn(target?.label.orEmpty()))
                     return result("blocked", "支付页面确认操作请人工接管", fresh)
+                val input = kind in setOf("type", "login_phone", "login_code")
+                if (input && (!node!!.isEditable || kind == "type" && command.optString("text").length > 8000)) return result("blocked", "输入目标无效", fresh)
+                if (kind == "long_press" && !node!!.isLongClickable) return result("blocked", "目标不支持长按", fresh)
+                if (kind == "scroll" && (!node!!.isScrollable || command.optString("direction") !in setOf("up", "down", "left", "right"))) return result("blocked", "滚动目标或方向无效", fresh)
+                if (kind in setOf("login_phone", "login_code") && (command.optString("package_name") != fresh.getString("package_name") || !command.isNull("text"))) return result("blocked", "登录目标应用不匹配", fresh, JSONObject().put("human_takeover", "login"))
+                val inputLabel = "${node!!.hintText?.toString().orEmpty()} ${node.contentDescription?.toString().orEmpty()} ${node.viewIdResourceName.orEmpty()}"
+                if (kind == "login_code" && !Policy.codeInput(inputLabel) || kind == "login_phone" && !Policy.phoneInput(inputLabel))
+                    return result("blocked", "目标未标识为对应的登录输入框，请人工填写", fresh, JSONObject().put("human_takeover", "login"))
+                val bounds = Rect().also { node!!.getBoundsInScreen(it) }
+                val geometry = ActionFeedbackGeometry.create(kind, listOf(bounds.left, bounds.top, bounds.right, bounds.bottom), fresh.getInt("width"), fresh.getInt("height"), command.optString("direction"))
+                    ?: return result("stale", "目标不在可见屏幕内，请重新观察", fresh)
+                if (actionGeneration.get() != executionGeneration) return result("cancelled", "执行已暂停", fresh)
+                val inputText = if (kind in setOf("login_phone", "login_code")) {
+                    try { LoginAssist(this).valueFor(kind, fresh.getString("package_name"), command.getString("run_id")) }
+                    catch (_: IllegalStateException) { null }
+                        ?: return result("blocked", "请在本机配置登录资料或等待匹配的验证码", fresh, JSONObject().put("human_takeover", "login"))
+                } else command.optString("text")
+                if (actionGeneration.get() != executionGeneration) return result("cancelled", "执行已暂停", fresh)
+                if (snapshot.navigationGeneration != navigationGeneration) return result("stale", "页面导航已变化，请重新观察", observe())
                 // A revalidated target is single-use across device actions; all current safety checks still apply.
                 targetHistory.clear()
+                val token = if (getSharedPreferences("doppel", MODE_PRIVATE).getBoolean("action_feedback", true)) feedback.begin(geometry) else null
                 val acted = when(kind) {
                     "tap" -> node!!.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    "type" -> {
-                        if (!node!!.isEditable || command.optString("text").length > 8000) return result("blocked", "输入目标无效")
-                        node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, command.optString("text")) })
-                    }
+                    "long_press" -> node!!.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
+                    "type", "login_phone", "login_code" -> node!!.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, inputText) })
                     else -> {
                         val direction = command.optString("direction")
                         val action = when(direction) { "up", "left" -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD; "down", "right" -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD; else -> return result("blocked", "滚动方向无效") }
                         node!!.performAction(action)
                     }
                 }
-                return result(if (acted) "ok" else "error", if (acted) "系统已接受操作，请检查后续屏幕" else "控件未执行操作", settledObservation(), JSONObject().put("target_revalidated", stable))
+                if (token != null) feedback.finish(token, acted)
+                return result(if (acted) "ok" else "error", if (acted) "系统已接受操作，请检查后续屏幕" else "控件未执行操作", settledObservation(), JSONObject().put("target_revalidated", stable).put("action_state", if (acted) "accepted" else "failed"))
             }
+            if (mutation && actionGeneration.get() != executionGeneration) return result("cancelled", "执行已暂停", current)
             targetHistory.clear()
             when(kind) {
                 "back" -> return result(if (performGlobalAction(GLOBAL_ACTION_BACK)) "ok" else "error", observation = settledObservation())
@@ -189,7 +263,7 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                 }
             }
             return result("blocked", "不支持的命令")
-        } catch (_: Exception) { return result("error", "设备操作失败，请重新观察并检查权限") }
+        } catch (_: Exception) { feedback.clear(); return result("error", "设备操作失败，请重新观察并检查权限") }
     }
     private fun settledObservation(): JSONObject? {
         var previous: JSONObject? = null
@@ -205,8 +279,14 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
     }
     private fun screenshot(command: JSONObject): JSONObject {
         val result = JSONObject().put("command_id", command.getString("id")).put("run_id", command.getString("run_id")).put("status", "error").put("message", "此系统不支持无障碍截图（需要 Android 11）").put("data", JSONObject())
+        val before = observe()
+        fun privateScreen() = LoginAssist.settingsVisible || LoginAssist.sensitiveSessionActive() || codeFieldVisible || phoneFieldPopulated
+        fun blocked() = result.put("status", "blocked").put("message", "登录资料或验证码期间不上传截图").put("data", JSONObject().put("human_takeover", "login"))
+        if (privateScreen()) return blocked()
         if (Build.VERSION.SDK_INT < 30) return result
+        if (!feedback.clearBeforeScreenshot()) return result.put("message", "屏幕反馈仍在清理，请重新截图")
         val latch = CountDownLatch(1)
+        val captured = java.util.concurrent.atomic.AtomicReference<JSONObject?>()
         takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
             override fun onSuccess(value: ScreenshotResult) {
                 try {
@@ -215,15 +295,23 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                         val scale = 1080f / maxOf(bitmap.width, bitmap.height)
                         val output = if (scale < 1f) Bitmap.createScaledBitmap(bitmap, (bitmap.width * scale).toInt(), (bitmap.height * scale).toInt(), true) else bitmap
                         val stream = ByteArrayOutputStream(); output.compress(Bitmap.CompressFormat.PNG, 100, stream)
-                        result.put("status", "ok").put("message", "").put("data", JSONObject().put("image_base64", Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)).put("mime_type", "image/png"))
+                        captured.set(JSONObject().put("status", "ok").put("message", "").put("data", JSONObject().put("image_base64", Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)).put("mime_type", "image/png")))
                         if (output !== bitmap) output.recycle()
                         bitmap.recycle()
                     }
                 } finally { value.hardwareBuffer.close(); latch.countDown() }
             }
-            override fun onFailure(errorCode: Int) { result.put("message", "截图不可用，可能为受保护页面或权限限制"); latch.countDown() }
+            override fun onFailure(errorCode: Int) { captured.set(JSONObject().put("status", "error").put("message", "截图不可用，可能为受保护页面或权限限制")); latch.countDown() }
         })
-        if (!latch.await(5, TimeUnit.SECONDS)) result.put("status", "error").put("message", "截图超时")
+        // Late callbacks own a separate result and cannot attach an image after timeout.
+        if (!latch.await(5, TimeUnit.SECONDS)) return result.put("status", "error").put("message", "截图超时")
+        val shot = captured.get() ?: return result.put("message", "截图处理失败")
+        result.put("status", shot.optString("status", "error")).put("message", shot.optString("message")).put("data", shot.optJSONObject("data") ?: JSONObject())
+        if (result.optString("status") == "ok") {
+            val after = observe()
+            if (privateScreen()) return blocked()
+            if (after.getString("screen_id") != before.getString("screen_id")) return result.put("status", "stale").put("message", "截图期间页面发生变化，请重新观察").put("data", JSONObject()).put("observation", after)
+        }
         return result
     }
 }

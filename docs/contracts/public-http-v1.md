@@ -12,6 +12,7 @@ another owner's data. Health is GET /health with no token and contains no secret
 | --- | --- | --- |
 | POST /devices | {installation_id,name} | {id,name,last_seen} |
 | GET /devices | None | {items:[Device]} |
+| GET /points | None | Developer gateway only: unlimited=true, retained input/output tokens and estimated used_points |
 | POST /runs | {device_id,goal,mode,allowed_packages?} | Run; HTTP 201 |
 | GET /runs | None | {items:[Run]} |
 | GET /runs/{id} | None | Run |
@@ -44,6 +45,12 @@ specific command or extension invocation when applicable. Clients display exact
 pending scope and submit its current request_id; they cannot substitute arguments.
 An expired request or changed target/configuration returns 409.
 
+Verification/login takeover uses status=paused and a pending request with
+manual_only=true and reason=verification|login. Display the message and use
+POST /runs/{id}/resume after the user has acted; do not submit an ordinary answer.
+requires_fresh_observation gates resumed model work until a current screen is
+received. The interrupted mutation is not automatically replayed.
+
 Events contain sequence, kind, message, data and created_at; use sequence as the
 after cursor. Result status and subsequent observation determine actual progress,
 not command acceptance alone. Completed tasks require host-generated evidence.
@@ -57,10 +64,13 @@ not command acceptance alone. Completed tasks require host-generated evidence.
 }
 ```
 
-Command.kind supports observe/launch/tap/type/scroll/back/home/wait/screenshot/
-open_document. launch uses package_name; type uses text; scroll uses direction
+Command.kind supports observe/launch/tap/long_press/type/login_phone/login_code/
+scroll/back/home/wait/screenshot/open_document. launch uses package_name; type uses text; scroll uses direction
 up/down/left/right and optionally target; wait uses duration_ms; open_document uses
-uri. Tap/type require target and screen_id. observe can request include_screenshot.
+uri. Tap/long_press/type/login_phone/login_code require target and screen_id.
+Login commands require the current package_name and reject non-null text; local
+profiles supply values. Their MCP tools accept only target and screen_id.
+observe can request include_screenshot.
 No raw-coordinate command is exposed. Current package scope and sensitive controls
 are independently checked on host/device.
 
@@ -73,7 +83,7 @@ are independently checked on host/device.
 
 Result.status is ok/stale/blocked/error/cancelled. Observation includes screen_id,
 package_name, width, height, nodes and captured_at. Each node has id, text,
-description, role, bounds=[left,top,right,bottom], clickable, editable, enabled,
+description, role, bounds=[left,top,right,bottom], clickable, long_clickable, editable, enabled,
 scrollable, password and resource_id. The device redacts password contents and
 caps its tree/text size; clients must preserve node IDs instead of reconstructing
 coordinates. Screenshot data contains image_base64 and mime_type when available;

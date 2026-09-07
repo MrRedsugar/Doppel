@@ -4,6 +4,9 @@ Public modules target Android 26+, compile/target SDK 35, Kotlin 2.1.20,
 Android Gradle Plugin 8.9.2 and Gradle 8.11.1. Use JDK 17 or a newer compatible JDK.
 The developer app connects directly to the standalone public gateway.
 
+The alpha.2 workspace, visible execution, verification takeover, and local login
+profiles are described in [Interaction and Login Assistance](interaction-login.md).
+
 ## Build and Connect
 
 Set JAVA_HOME and ANDROID_HOME for your local JDK and Android SDK. From android/:
@@ -44,8 +47,9 @@ The host's list_apps(query="") tool optionally filters labels and package names
 case-insensitively; an omitted query keeps full discovery. The framework sends
 compact relevant context to models.
 
-ActionExecutor.execute supports observe, launch, tap, type, scroll, back, home,
-wait, screenshot and open_document. Tap/type require a current screen_id and node
+ActionExecutor.execute supports observe, launch, tap, long_press, type,
+login_phone, login_code, scroll, back, home, wait, screenshot and open_document.
+Tap/long_press/type/login_phone/login_code require a current screen_id and node
 reference. Targets are reobserved before action; stale/invalid targets fail.
 For dynamic screens, a bounded local history retains at most eight observations
 for 30 seconds. It can revalidate a named target only when the package, window,
@@ -62,7 +66,7 @@ unlabeled or malicious payment UI can be recognized. Payments remain manual.
 
 API 30+ screenshots use Android's accessibility screenshot API and are resized
 to a longest edge of 1,080 pixels. Protected surfaces, denied requests or timeouts
-fail explicitly. Combined observation/screenshot requests compare screen hashes
+fail explicitly. All screenshot requests compare screen hashes
 before and after capture and return stale without mismatched image data when the
 page changes. Actions return a settled observation, sampling every 250 ms for up
 to 1.5 seconds and seeking three matching snapshots without replaying the action.

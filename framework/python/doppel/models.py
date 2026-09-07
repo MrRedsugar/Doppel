@@ -19,6 +19,7 @@ class Node(Model):
     role: str = "view"
     bounds: list[int] = Field(min_length=4, max_length=4)
     clickable: bool = False
+    long_clickable: bool = False
     editable: bool = False
     enabled: bool = True
     scrollable: bool = False
@@ -44,7 +45,7 @@ class Observation(Model):
     captured_at: int = 0
 
 
-CommandKind = Literal["observe", "launch", "tap", "type", "scroll", "back", "home", "wait", "screenshot", "open_document"]
+CommandKind = Literal["observe", "launch", "tap", "long_press", "type", "login_phone", "login_code", "scroll", "back", "home", "wait", "screenshot", "open_document"]
 
 
 class Command(Model):
@@ -62,10 +63,17 @@ class Command(Model):
 
     @model_validator(mode="after")
     def require_fields(self):
-        if self.kind in {"tap", "type"} and (not self.target or not self.screen_id):
+        if self.kind in {"tap", "long_press", "type", "login_phone", "login_code"} and (not self.target or not self.screen_id):
             raise ValueError("A current screen_id and target are required")
         if self.kind == "type" and self.text is None:
             raise ValueError("text is required")
+        if self.kind in {"login_phone", "login_code"}:
+            if not self.package_name:
+                raise ValueError("Local login requires the current application package")
+            if any(value is not None for value in (self.text, self.uri, self.direction, self.duration_ms)) or self.include_screenshot:
+                raise ValueError("Local login accepts only the current target and application package")
+        if self.kind == "long_press" and self.duration_ms is not None:
+            raise ValueError("Long press uses the Android accessibility action duration")
         if self.kind == "launch" and not self.package_name:
             raise ValueError("package_name is required")
         if self.kind == "open_document" and not self.uri:
@@ -100,6 +108,7 @@ class Run(Model):
     message: str = ""
     created_at: str
     pending_request: dict[str, Any] | None = None
+    requires_fresh_observation: bool = False
     allowed_packages: list[str] = Field(default_factory=list, max_length=40)
 
 

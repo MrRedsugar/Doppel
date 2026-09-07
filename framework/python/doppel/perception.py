@@ -33,7 +33,7 @@ def _contained_label(node, observation):
         x1, y1, x2, y2 = other.bounds
         if other is node or not (left <= x1 < x2 <= right and top <= y1 < y2 <= bottom):
             continue
-        if other.clickable or other.editable or other.scrollable or other.password:
+        if other.clickable or other.long_clickable or other.editable or other.scrollable or other.password:
             return ""
         label = " ".join((other.text or other.description).split())[:300]
         if label:
@@ -48,14 +48,16 @@ def compact_observation(observation: Observation, *, limit: int = 14000) -> str:
         if node.password:
             continue
         label = " ".join((node.text or node.description).split())[:300]
-        if not label and node.clickable:
+        if not label and (node.clickable or node.long_clickable):
             label = _contained_label(node, observation)
-        if not label and not (node.clickable or node.editable or node.scrollable):
+        if not label and not (node.clickable or node.long_clickable or node.editable or node.scrollable):
             continue
         properties = [node.role.rsplit(".", 1)[-1]]
         if node.clickable and node.enabled:
             properties.append("tap")
-        if not (node.clickable or node.editable or node.scrollable):
+        if node.long_clickable and node.enabled:
+            properties.append("long_press")
+        if not (node.clickable or node.long_clickable or node.editable or node.scrollable):
             properties.append("read-only")
         if node.editable:
             properties.append("input")

@@ -17,6 +17,7 @@ def test_standalone_auth_bootstrap_and_gateway(tmp_path):
     with TestClient(app) as client:
         assert client.get('/health').json()['mode'] == 'developer'
         assert client.get('/v1/devices').status_code == 401
+        assert client.get('/v1/points').status_code == 401
         assert client.get('/v1/devices', headers={'Authorization': 'Bearer wrong'}).status_code == 401
         client.headers['Authorization'] = 'Bearer ' + token
         device = client.post('/v1/devices', json={'installation_id': 'standalone', 'name': 'Test device'})
@@ -25,7 +26,19 @@ def test_standalone_auth_bootstrap_and_gateway(tmp_path):
         assert run.status_code == 201
         assert client.get('/v1/extensions').status_code == 200
         assert client.get('/v1/auth/code').status_code == 404
-        assert client.get('/v1/points').status_code == 404
+        points = client.get('/v1/points').json()
+        assert points['unlimited'] is True and points['mode'] == 'developer'
+        assert points['remaining'] is None and points['daily_limit'] is None
+        with app.state.runtime.store.transaction() as db:
+            app.state.runtime.store.event(db, run.json()['id'], 'usage', 'Synthetic usage',
+                                          {'call_id': 'one', 'input_tokens': 601, 'output_tokens': 9, 'model': 'fixture'})
+            app.state.runtime.store.event(db, run.json()['id'], 'usage', 'Synthetic usage',
+                                          {'call_id': 'two', 'input_tokens': 290, 'output_tokens': 10, 'model': 'fixture'})
+        points = client.get('/v1/points').json()
+        assert points['input_tokens'] == 891 and points['output_tokens'] == 19
+        assert points['used_points'] == 4 and points['calls'] == 2
+        assert points['usage_period'] == 'retained_history'
+        assert client.put('/v1/points', json={'unlimited': False}).status_code == 405
         assert client.post('/v1/runs/' + run.json()['id'] + '/cancel').status_code == 200
         assert app.state.runtime.billing is None
 

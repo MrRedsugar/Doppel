@@ -41,7 +41,7 @@ def finish_task(runtime, run_id, outcome, summary, evidence_ids):
     with runtime.store.transaction() as db:
         row = db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
         run = Run.model_validate_json(row["payload"])
-        if run.status != "running":
+        if run.status != "running" or run.requires_fresh_observation:
             raise Conflict("Resolve the current task state before finishing")
         if db.execute("SELECT 1 FROM commands WHERE run_id=? AND result IS NULL", (run_id,)).fetchone():
             raise Conflict("Wait for the pending device result")

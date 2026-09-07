@@ -7,6 +7,8 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.speech.*
 import android.view.MotionEvent
+import android.view.Gravity
+import android.graphics.Color
 import android.widget.*
 import org.json.JSONObject
 import java.util.concurrent.Executors
@@ -26,13 +28,23 @@ class VoiceActivity : Activity(), RecognitionListener {
     private var permissionStartPending = false
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState); gateway = Gateway(this)
-        val layout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 40, 24, 24) }
-        setContentView(layout)
-        window.setGravity(android.view.Gravity.BOTTOM)
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.WHITE) }
+        UiTheme.window(this, root)
+        val layout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(UiTheme.dp(this@VoiceActivity, 20), UiTheme.dp(this@VoiceActivity, 16), UiTheme.dp(this@VoiceActivity, 20), UiTheme.dp(this@VoiceActivity, 20)) }
+        root.addView(ScrollView(this).apply { isFillViewport = true; addView(layout) })
+        setContentView(root)
+        window.setGravity(Gravity.BOTTOM)
         window.setLayout(android.view.ViewGroup.LayoutParams.MATCH_PARENT, android.view.ViewGroup.LayoutParams.WRAP_CONTENT)
-        status = TextView(this).apply { textSize = 20f; text = "语音任务" }; layout.addView(status)
-        text = EditText(this).apply { hint = "输入任务"; minLines = 3 }; layout.addView(text)
-        val mic = ImageButton(this).apply { setImageResource(android.R.drawable.ic_btn_speak_now); contentDescription = "按住说话" }; layout.addView(mic, LinearLayout.LayoutParams((56 * resources.displayMetrics.density).toInt(), (52 * resources.displayMetrics.density).toInt()))
+        window.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        header.addView(UiTheme.text(this, "语音任务", 21f, UiTheme.ink, true), LinearLayout.LayoutParams(0, -2, 1f))
+        header.addView(UiTheme.icon(this, android.R.drawable.ic_menu_close_clear_cancel, "关闭") { finishVoice() }, LinearLayout.LayoutParams(UiTheme.dp(this, 44), UiTheme.dp(this, 44))); layout.addView(header)
+        status = UiTheme.text(this, "等待输入", 13f, UiTheme.muted).apply { setPadding(0, UiTheme.dp(this@VoiceActivity, 4), 0, UiTheme.dp(this@VoiceActivity, 18)) }; layout.addView(status)
+        text = UiTheme.field(this, "输入任务").apply { minLines = 4; maxLines = 7; gravity = Gravity.TOP }; layout.addView(text, LinearLayout.LayoutParams(-1, -2))
+        val tools = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, UiTheme.dp(this@VoiceActivity, 12), 0, UiTheme.dp(this@VoiceActivity, 14)) }
+        val mic = UiTheme.icon(this, android.R.drawable.ic_btn_speak_now, "按住说话", true) {}; tools.addView(mic, LinearLayout.LayoutParams(UiTheme.dp(this, 56), UiTheme.dp(this, 56)))
+        tools.addView(Space(this), LinearLayout.LayoutParams(0, 1, 1f))
+        tools.addView(UiTheme.icon(this, android.R.drawable.ic_menu_manage, "语音设置与中文模型") { startActivity(Intent(this, SpeechSettingsActivity::class.java)) }, LinearLayout.LayoutParams(UiTheme.dp(this, 44), UiTheme.dp(this, 44))); layout.addView(tools)
         if (SpeechRecognizer.isRecognitionAvailable(this)) {
             recognizer = SpeechRecognizer.createSpeechRecognizer(this).also { it.setRecognitionListener(this) }
         }
@@ -54,8 +66,7 @@ class VoiceActivity : Activity(), RecognitionListener {
                 true
         }
         if (recognizer == null && !SpeechModels.installed(this)) status.text = "中文模型未安装，可下载或输入文字"
-        layout.addView(Button(this).apply { this.text = "语音设置与中文模型"; setOnClickListener { startActivity(Intent(this@VoiceActivity, SpeechSettingsActivity::class.java)) } })
-        confirm = Button(this).apply { this.text = "开始任务"; setOnClickListener { submitTask() } }; layout.addView(confirm)
+        confirm = UiTheme.command(this, "开始任务", true) { submitTask() }; layout.addView(confirm, LinearLayout.LayoutParams(-1, UiTheme.dp(this, 48)))
     }
     private fun finishVoice() { if (isTaskRoot) finishAndRemoveTask() else finish() }
     private fun submitTask() {

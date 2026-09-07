@@ -65,6 +65,13 @@ def create_app(data_dir: str | Path, *, api_key_file: str | Path | None = None,
     def health():
         return {'ok': True, 'mode': 'developer', 'model_configured': runtime.config.api_key_file is not None}
 
+    @app.get('/v1/points')
+    def points(current_owner=Depends(owner)):
+        usage = runtime.store.one("SELECT COUNT(*) AS calls, COALESCE(SUM(json_extract(e.data,'$.input_tokens')),0) AS input_tokens, COALESCE(SUM(json_extract(e.data,'$.output_tokens')),0) AS output_tokens, COALESCE(SUM(MAX(1,(json_extract(e.data,'$.input_tokens') + json_extract(e.data,'$.output_tokens') + 299) / 300)),0) AS used_points FROM events e JOIN runs r ON r.id=e.run_id WHERE r.owner=? AND e.kind='usage'", (current_owner,))
+        return {'mode': 'developer', 'unlimited': True, 'remaining': None, 'daily_limit': None,
+                'purchased': 0, 'debt': 0, 'reserved_points': 0, 'usage_period': 'retained_history',
+                'tokens_per_point': 300, 'rate_version': 'v2', 'points_are_estimate': True, **dict(usage)}
+
     app.include_router(create_router(runtime, owner))
     return app
 

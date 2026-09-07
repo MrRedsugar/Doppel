@@ -28,6 +28,7 @@ FILES = {
     'docs/developer/documents.md', 'docs/developer/standalone.md',
     'docs/developer/open-source.md', 'docs/developer/public-readme.md',
     'docs/developer/data-retention.md',
+    'docs/developer/interaction-login.md',
     'docs/architecture/public-system.md', 'docs/contracts/public-http-v1.md',
     'scripts/export-public.py',
 }
@@ -43,7 +44,7 @@ rootProject.name = "DoppelPublic"
 include(":sdk", ":developer-app", ":test-app")
 '''
 SECRET = re.compile(rb'sk-[A-Za-z0-9_-]{24,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----')
-PRIVATE_IMPORT = re.compile(rb'(?:from|import)\s+doppel_product\b|dev\.doppel\.app\b|/v1/auth/(?:login|code)|/v1/points')
+PRIVATE_IMPORT = re.compile(rb'(?:from|import)\s+doppel_product\b|dev\.doppel\.app\b|/v1/auth/(?:login|code)')
 
 
 def allowed(path: Path) -> bool:
