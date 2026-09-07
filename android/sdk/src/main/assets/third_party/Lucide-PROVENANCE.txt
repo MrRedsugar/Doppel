@@ -1,0 +1,103 @@
+Doppel native Android line icons
+
+Source: https://github.com/lucide-icons/lucide
+Pinned upstream revision: 2bfb9bb1bae5d74f6a9f81640ddd8bccc2c71860
+Retrieved: 2026-09-07
+License: ISC, with the upstream Feather-derived MIT notices preserved
+in Lucide-LICENSE.txt. No additional icon runtime library is required.
+
+Original SVG paths are preserved. SVG circles, lines, polylines and rounded
+rectangles are converted structurally to equivalent Android pathData.
+The 24-unit viewBox, 2-unit stroke, rounded caps/joins and transparent fill
+are preserved. currentColor becomes a neutral default, tinted by the UI.
+No SVG transforms, external resources, gradients or unsupported primitives
+were accepted. VectorDrawable uses only attributes available by API 26.
+
+The launcher foreground reuses layers-2 paths in a centered 108-unit
+adaptive icon (scale 2.2, translation 27.6) with white strokes. Its solid
+graphite background and Android adaptive mask are local presentation.
+
+Raw SVG URLs: https://raw.githubusercontent.com/lucide-icons/lucide/2bfb9bb1bae5d74f6a9f81640ddd8bccc2c71860/icons/<name>.svg
+License URL: https://raw.githubusercontent.com/lucide-icons/lucide/2bfb9bb1bae5d74f6a9f81640ddd8bccc2c71860/LICENSE
+License SHA-256: b495047bd93a9b06913511076f504daba17d5bbeb3e0650f3bb53a4220329c57
+
+accessibility.svg -> doppel_ic_accessibility.xml
+SHA-256 114a9b6983ee20c43d76556bbb5633085a0e082b19464dfa36f1e27768c8f3ea
+
+arrow-up.svg -> doppel_ic_arrow_up.xml
+SHA-256 8c22c25874c80bb062bef985d207d8f1d4a4d7847237d0a8cf720a3235968518
+
+chevron-down.svg -> doppel_ic_chevron_down.xml
+SHA-256 66ea878e72ed3488bb3b464c39dfdccee8d1f78e560dccea40e5e12da0e87e87
+
+chevron-left.svg -> doppel_ic_chevron_left.xml
+SHA-256 83b0681aa38bf55e9d52a1e4b4cced624abe1fe7678ecafda133a574f1161d93
+
+chevron-right.svg -> doppel_ic_chevron_right.xml
+SHA-256 2758143d7b2434e4aa7307dfd34405c87909ff4052f21b5f3f40d45224b4f19b
+
+files.svg -> doppel_ic_files.xml
+SHA-256 97adf06fc0511e7a40be93ecda04466ed196718ab4a5e3a62b1148cc49697775
+
+clock-fading.svg -> doppel_ic_clock_fading.xml
+SHA-256 97dc20d9d11a0801b17994d8b941b5b2039e55555ec0cbd471ab54667d841c28
+
+layers-2.svg -> doppel_ic_layers_2.xml
+SHA-256 2d659a3be70f6c517d24bf37c26c03c316db6d4dff941dc3464e26ece99beff3
+
+lock-keyhole.svg -> doppel_ic_lock_keyhole.xml
+SHA-256 fc0b8b7590d1d9e9bb0112c5c2e15a78ade0bfeca6d6f8c79fbbe149236d74be
+
+mail.svg -> doppel_ic_mail.xml
+SHA-256 3236a51d5b8ce9b0528cf2e6ad07e527bd636dded6f5a9d656072052b99caea8
+
+menu.svg -> doppel_ic_menu.xml
+SHA-256 af6491988ac1ba30dc5414f485bc48713e957e1edb0fbef4a0dd8691c3c21598
+
+mic.svg -> doppel_ic_mic.xml
+SHA-256 9b940cd735d1ffa270ba670c4e677d9a09400f3fa81d6b3f405b12a3b67a59a8
+
+panel-left.svg -> doppel_ic_panel_left.xml
+SHA-256 029f67b9e3eeb7ddf7c7c499b174c50388725e8ea50d4ea59ed7dbaf8d61cb82
+
+pause.svg -> doppel_ic_pause.xml
+SHA-256 f122ec4ea7f5693a0b1baafa9c708b53980dc87b4aacb297c6e6f71c1a4c115c
+
+pencil.svg -> doppel_ic_pencil.xml
+SHA-256 7e1ca7a6f5c1eb949671df762f2baadd32f5bd841d43153c3a15279af7d78d0c
+
+play.svg -> doppel_ic_play.xml
+SHA-256 d7c34786135922a92b6896f6c2384ceeb0346afbf6041dc79982011411409833
+
+plug.svg -> doppel_ic_plug.xml
+SHA-256 11ba780e4b6f15d37906a8a73537144b59720333d7a9fc8048a437d0389422f8
+
+plus.svg -> doppel_ic_plus.xml
+SHA-256 7f6af73bf1ff6c4bca3f18351c8d1bdec6749c0c2530c4de5da85d520c21df17
+
+refresh-cw.svg -> doppel_ic_refresh_cw.xml
+SHA-256 2e10dd403c85a24f163d59fc6151aa21147fe9402e1305dfc8979208caee8944
+
+scan.svg -> doppel_ic_scan.xml
+SHA-256 c77f0e634b2451a14a262a59b61d75bbcea3994b16eeba1f5753e86b33282a4d
+
+settings-2.svg -> doppel_ic_settings_2.xml
+SHA-256 06d06c191bd7eb28afaf9d40acb5c49ef69448fdeda91801d9823d7c440a4e10
+
+smartphone.svg -> doppel_ic_smartphone.xml
+SHA-256 f9fdb700b50feb5fc6436f53eb9813e9eb56a9071ac4cdcba69c7f7c1c13877d
+
+sparkles.svg -> doppel_ic_sparkles.xml
+SHA-256 f5499f33f09d7158151e9bd2ec0faf79ff8fb57292f84fdd7286d96d0f0424d8
+
+square-pen.svg -> doppel_ic_square_pen.xml
+SHA-256 09bdac7fdb94058246a5d3132eea0976e690d01694179ab6f474faa2c21de59a
+
+trash.svg -> doppel_ic_trash.xml
+SHA-256 27299f69ad7c6272be64b1b8e2d48cbd6dcf0ef0d4f92827a1affa945c91700e
+
+user-round.svg -> doppel_ic_user_round.xml
+SHA-256 84870f26f3faf8da45da84174517519e81b9e8f00319c78954fcbb74f50038a1
+
+x.svg -> doppel_ic_x.xml
+SHA-256 4a9cdab38fbb96162e7dace28e33f4ca0e49d8963a6162abc3d4691b7d675117

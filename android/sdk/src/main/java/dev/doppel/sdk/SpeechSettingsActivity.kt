@@ -2,7 +2,6 @@ package dev.doppel.sdk
 
 import android.app.Activity
 import android.app.AlertDialog
-import android.graphics.Color
 import android.content.res.ColorStateList
 import android.os.Bundle
 import android.view.View
@@ -23,27 +22,28 @@ class SpeechSettingsActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         title = "语音识别"
-        val pad = UiTheme.dp(this, 20)
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.WHITE) }
+        val pad = UiTheme.dp(this, 24)
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(UiTheme.background) }
         UiTheme.window(this, root); setContentView(root)
-        val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL; setPadding(UiTheme.dp(this@SpeechSettingsActivity, 8), UiTheme.dp(this@SpeechSettingsActivity, 8), pad, UiTheme.dp(this@SpeechSettingsActivity, 8)) }
+        val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL; setPadding(UiTheme.dp(this@SpeechSettingsActivity, 12), UiTheme.dp(this@SpeechSettingsActivity, 6), pad, UiTheme.dp(this@SpeechSettingsActivity, 6)) }
         header.addView(UiTheme.icon(this, android.R.drawable.ic_media_previous, "返回") { finish() }, LinearLayout.LayoutParams(UiTheme.dp(this, 44), UiTheme.dp(this, 44)))
-        header.addView(UiTheme.text(this, "语音识别", 19f, UiTheme.ink, true)); root.addView(header); root.addView(UiTheme.divider(this))
+        header.addView(UiTheme.text(this, "语音识别", 18f, UiTheme.ink, true)); root.addView(header); root.addView(UiTheme.divider(this))
         val layout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(pad, pad, pad, pad) }
-        root.addView(ScrollView(this).apply { setBackgroundColor(UiTheme.background); addView(layout) }, LinearLayout.LayoutParams(-1, 0, 1f))
-        layout.addView(UiTheme.text(this, "识别方式", 12f, UiTheme.muted, true).apply { setPadding(0, 0, 0, UiTheme.dp(this@SpeechSettingsActivity, 10)) })
+        root.addView(ScrollView(this).apply { isVerticalScrollBarEnabled = false; addView(layout) }, LinearLayout.LayoutParams(-1, 0, 1f))
+        layout.addView(UiTheme.text(this, "识别方式", 13f, UiTheme.muted, true).apply { setPadding(0, 0, 0, UiTheme.dp(this@SpeechSettingsActivity, 10)) })
         val prefs = getSharedPreferences("doppel", MODE_PRIVATE)
         val values = listOf("auto", "local", "system")
         val providers = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
         listOf("自动", "本地中文", "系统识别").forEachIndexed { index, title ->
             providers.addView(RadioButton(this).apply {
-                id = View.generateViewId(); text = title; textSize = 15f; setTextColor(UiTheme.ink); buttonTintList = ColorStateList.valueOf(UiTheme.green); isChecked = prefs.getString("speech_provider", "auto") == values[index]
+                id = View.generateViewId(); text = title; textSize = 15f; letterSpacing = 0f; setTextColor(UiTheme.ink); buttonTintList = ColorStateList.valueOf(UiTheme.ink); isChecked = prefs.getString("speech_provider", "auto") == values[index]
+                setPadding(UiTheme.dp(this@SpeechSettingsActivity, 2), 0, 0, 0)
                 setOnCheckedChangeListener { _, checked -> if (checked) prefs.edit().putString("speech_provider", values[index]).apply() }
-            }, LinearLayout.LayoutParams(-1, UiTheme.dp(this, 50)))
+            }, LinearLayout.LayoutParams(-1, UiTheme.dp(this, 54)))
         }; layout.addView(providers); layout.addView(UiTheme.divider(this))
-        layout.addView(UiTheme.text(this, "中文模型", 19f, UiTheme.ink, true).apply { setPadding(0, UiTheme.dp(this@SpeechSettingsActivity, 28), 0, UiTheme.dp(this@SpeechSettingsActivity, 8)) })
+        layout.addView(UiTheme.text(this, "中文模型", 17f, UiTheme.ink, true).apply { setPadding(0, UiTheme.dp(this@SpeechSettingsActivity, 28), 0, UiTheme.dp(this@SpeechSettingsActivity, 10)) })
         layout.addView(UiTheme.text(this, "Vosk · 简体中文 · 42 MiB", 13f, UiTheme.muted))
-        status = UiTheme.text(this, "", 14f, UiTheme.green).apply { setPadding(0, UiTheme.dp(this@SpeechSettingsActivity, 18), 0, UiTheme.dp(this@SpeechSettingsActivity, 14)) }; layout.addView(status)
+        status = UiTheme.text(this, "", 14f, UiTheme.muted).apply { setPadding(0, UiTheme.dp(this@SpeechSettingsActivity, 18), 0, UiTheme.dp(this@SpeechSettingsActivity, 14)); setLineSpacing(UiTheme.dp(this@SpeechSettingsActivity, 3).toFloat(), 1f) }; layout.addView(status)
         progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100; progressTintList = ColorStateList.valueOf(UiTheme.green) }; layout.addView(progress, LinearLayout.LayoutParams(-1, UiTheme.dp(this, 4)))
         install = UiTheme.command(this, "下载中文模型", true) { SpeechModels.install(this) }; layout.addView(install, LinearLayout.LayoutParams(-1, UiTheme.dp(this, 46)).apply { topMargin = UiTheme.dp(this@SpeechSettingsActivity, 16) })
         cancel = UiTheme.command(this, "取消下载") { SpeechModels.cancel() }; layout.addView(cancel, LinearLayout.LayoutParams(-1, UiTheme.dp(this, 44)).apply { topMargin = UiTheme.dp(this@SpeechSettingsActivity, 10) })

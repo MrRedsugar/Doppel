@@ -7,6 +7,28 @@ The developer app connects directly to the standalone public gateway.
 The alpha.2 workspace, visible execution, verification takeover, and local login
 profiles are described in [Interaction and Login Assistance](interaction-login.md).
 
+## Conversation Interface
+
+The native client opens a conversation with a bottom composer and side navigation
+for tasks, history, files and settings. It retains saved drafts, execution modes,
+pause/resume/cancel, approval and human takeover controls. Translucent sheets and
+restrained highlights share a neutral theme with the voice and login settings.
+
+Android 31+ can apply system window background blur behind sheets when the device
+and system settings support it. Earlier versions use the readable translucent
+background and dimming fallback; no screenshot is taken to create the effect.
+The LDPlayer validation target runs API 28 and exercises only that fallback, not
+actual system background blur.
+
+Primary interface icons are 24-unit Lucide vectors from official revision
+`2bfb9bb1bae5d74f6a9f81640ddd8bccc2c71860`. The launcher uses Lucide's neutral
+`layers-2` symbol in an Android adaptive icon. The original ISC license and
+applicable Feather MIT notices are bundled in
+`android/sdk/src/main/assets/third_party/Lucide-LICENSE.txt`; the neighboring
+`Lucide-PROVENANCE.txt` records source URLs, SHA-256 hashes and the structural
+SVG-to-VectorDrawable conversion. Both files are included in SDK AAR and client
+APK assets. The vectors require no icon runtime dependency.
+
 ## Build and Connect
 
 Set JAVA_HOME and ANDROID_HOME for your local JDK and Android SDK. From android/:
@@ -174,5 +196,5 @@ every visual task or speech-recognition provider has passed an end-to-end test.
 
 Runtime dependencies are Kotlin stdlib, AndroidX Core, Vosk Android and JNA.
 JUnit is test-only.
-Platform drawables provide icons. See THIRD_PARTY_NOTICES.md in the repository root
+Lucide notices accompany the icon assets. See THIRD_PARTY_NOTICES.md in the repository root
 for licenses and the requirements for auditing redistributed binary dependencies.

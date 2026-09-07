@@ -44,6 +44,13 @@ transitive dependency. Provider service terms and model pricing remain separate.
 | Gradle wrapper | 8.11.1 | Apache-2.0; wrapper scripts preserve upstream copyright/license headers |
 | JUnit | 4.13.2 | EPL-1.0; test-only dependency |
 | Gradle distribution | 8.11.1 | Apache-2.0 plus bundled third-party licenses; not vendored |
+| Lucide icons | `2bfb9bb1bae5d74f6a9f81640ddd8bccc2c71860` | ISC with upstream Feather-derived MIT notice; 27 vectors adapted for Android |
+
+Lucide icons come from https://github.com/lucide-icons/lucide. Their original
+paths and primitive geometry are preserved as Android VectorDrawables. The full
+upstream license and individual source SHA-256 hashes are bundled in
+`android/sdk/src/main/assets/third_party/Lucide-LICENSE.txt` and
+`Lucide-PROVENANCE.txt`. The launcher's layers mark uses the same licensed geometry.
 
 The Gradle wrapper scripts and JAR are the sole vendored build-tool artifacts.
 Copyright the original Gradle authors; obtain source/license at

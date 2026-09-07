@@ -37,6 +37,7 @@ ANDROID_LICENSES = {
     'NOTICE.txt', 'Apache-2.0.txt', 'JNA-LICENSE.txt', 'OpenBLAS-LICENSE.txt',
     'CLAPACK-COPYING.txt', 'F2C-NOTICE.txt', 'libffi-LICENSE.txt',
     'libcxx-LICENSE.txt', 'libcxxabi-LICENSE.txt', 'libunwind-LICENSE.txt',
+    'Lucide-LICENSE.txt', 'Lucide-PROVENANCE.txt',
 }
 ANDROID_SETTINGS = '''pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
 dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }

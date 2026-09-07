@@ -28,21 +28,32 @@ class VoiceActivity : Activity(), RecognitionListener {
     private var permissionStartPending = false
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState); gateway = Gateway(this)
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.WHITE) }
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; background = UiTheme.glass(this@VoiceActivity, 24); clipToOutline = true }
         UiTheme.window(this, root)
-        val layout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(UiTheme.dp(this@VoiceActivity, 20), UiTheme.dp(this@VoiceActivity, 16), UiTheme.dp(this@VoiceActivity, 20), UiTheme.dp(this@VoiceActivity, 20)) }
-        root.addView(ScrollView(this).apply { isFillViewport = true; addView(layout) })
+        val layout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(UiTheme.dp(this@VoiceActivity, 24), UiTheme.dp(this@VoiceActivity, 10), UiTheme.dp(this@VoiceActivity, 24), UiTheme.dp(this@VoiceActivity, 24)) }
+        root.addView(ScrollView(this).apply { isFillViewport = true; isVerticalScrollBarEnabled = false; addView(layout) })
         setContentView(root)
+        UiTheme.styleSheet(window)
         window.setGravity(Gravity.BOTTOM)
         window.setLayout(android.view.ViewGroup.LayoutParams.MATCH_PARENT, android.view.ViewGroup.LayoutParams.WRAP_CONTENT)
         window.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        layout.addView(android.view.View(this).apply {
+            background = UiTheme.surface(this@VoiceActivity, UiTheme.line)
+            importantForAccessibility = android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }, LinearLayout.LayoutParams(UiTheme.dp(this, 32), UiTheme.dp(this, 4)).apply { gravity = Gravity.CENTER_HORIZONTAL; bottomMargin = UiTheme.dp(this@VoiceActivity, 10) })
         val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        header.addView(UiTheme.text(this, "语音任务", 21f, UiTheme.ink, true), LinearLayout.LayoutParams(0, -2, 1f))
+        header.addView(UiTheme.text(this, "语音任务", 18f, UiTheme.ink, true), LinearLayout.LayoutParams(0, -2, 1f))
         header.addView(UiTheme.icon(this, android.R.drawable.ic_menu_close_clear_cancel, "关闭") { finishVoice() }, LinearLayout.LayoutParams(UiTheme.dp(this, 44), UiTheme.dp(this, 44))); layout.addView(header)
-        status = UiTheme.text(this, "等待输入", 13f, UiTheme.muted).apply { setPadding(0, UiTheme.dp(this@VoiceActivity, 4), 0, UiTheme.dp(this@VoiceActivity, 18)) }; layout.addView(status)
-        text = UiTheme.field(this, "输入任务").apply { minLines = 4; maxLines = 7; gravity = Gravity.TOP }; layout.addView(text, LinearLayout.LayoutParams(-1, -2))
-        val tools = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, UiTheme.dp(this@VoiceActivity, 12), 0, UiTheme.dp(this@VoiceActivity, 14)) }
-        val mic = UiTheme.icon(this, android.R.drawable.ic_btn_speak_now, "按住说话", true) {}; tools.addView(mic, LinearLayout.LayoutParams(UiTheme.dp(this, 56), UiTheme.dp(this, 56)))
+        status = UiTheme.text(this, "等待输入", 13f, UiTheme.muted).apply { setPadding(0, UiTheme.dp(this@VoiceActivity, 2), 0, UiTheme.dp(this@VoiceActivity, 16)) }; layout.addView(status)
+        text = UiTheme.field(this, "输入任务").apply {
+            minLines = 3; maxLines = 6; gravity = Gravity.TOP; textSize = 18f
+            setBackgroundColor(Color.TRANSPARENT); setPadding(0, UiTheme.dp(this@VoiceActivity, 8), 0, UiTheme.dp(this@VoiceActivity, 12))
+            setLineSpacing(UiTheme.dp(this@VoiceActivity, 4).toFloat(), 1f)
+        }; layout.addView(text, LinearLayout.LayoutParams(-1, -2))
+        val tools = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, UiTheme.dp(this@VoiceActivity, 14), 0, UiTheme.dp(this@VoiceActivity, 18)) }
+        val mic = UiTheme.icon(this, android.R.drawable.ic_btn_speak_now, "按住说话", true) {}.apply {
+            background = android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(UiTheme.line), android.graphics.drawable.GradientDrawable().apply { shape = android.graphics.drawable.GradientDrawable.OVAL; setColor(UiTheme.ink) }, null)
+        }; tools.addView(mic, LinearLayout.LayoutParams(UiTheme.dp(this, 52), UiTheme.dp(this, 52)))
         tools.addView(Space(this), LinearLayout.LayoutParams(0, 1, 1f))
         tools.addView(UiTheme.icon(this, android.R.drawable.ic_menu_manage, "语音设置与中文模型") { startActivity(Intent(this, SpeechSettingsActivity::class.java)) }, LinearLayout.LayoutParams(UiTheme.dp(this, 44), UiTheme.dp(this, 44))); layout.addView(tools)
         if (SpeechRecognizer.isRecognitionAvailable(this)) {
@@ -66,7 +77,7 @@ class VoiceActivity : Activity(), RecognitionListener {
                 true
         }
         if (recognizer == null && !SpeechModels.installed(this)) status.text = "中文模型未安装，可下载或输入文字"
-        confirm = UiTheme.command(this, "开始任务", true) { submitTask() }; layout.addView(confirm, LinearLayout.LayoutParams(-1, UiTheme.dp(this, 48)))
+        confirm = UiTheme.command(this, "开始任务", true) { submitTask() }; layout.addView(confirm, LinearLayout.LayoutParams(-1, UiTheme.dp(this, 50)))
     }
     private fun finishVoice() { if (isTaskRoot) finishAndRemoveTask() else finish() }
     private fun submitTask() {

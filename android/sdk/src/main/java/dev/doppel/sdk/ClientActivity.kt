@@ -17,6 +17,12 @@ import java.util.UUID
 import java.util.concurrent.Executors
 
 open class ClientActivity : Activity() {
+    companion object {
+        private val taskCreation = java.util.concurrent.atomic.AtomicBoolean(false)
+        private val pendingWorkerRun = java.util.concurrent.atomic.AtomicReference<String?>(null)
+        private val submittedDraft = java.util.concurrent.atomic.AtomicReference<Pair<String, String>?>(null)
+        private val draftLock = Any()
+    }
     protected lateinit var gateway: Gateway
     protected lateinit var page: LinearLayout
     protected lateinit var status: TextView
@@ -24,6 +30,11 @@ open class ClientActivity : Activity() {
     protected open val additionalSections: List<String> = emptyList()
     protected open val showTokenSetting = true
     private lateinit var container: LinearLayout
+    private lateinit var composerDock: LinearLayout
+    private lateinit var conversationScroll: ScrollView
+    private var emptyConversation: View? = null
+    private var conversationContent: LinearLayout? = null
+    private var navigationDialog: android.app.Dialog? = null
     private var section = "任务"
     private var goal: EditText? = null
     private var runView: TextView? = null
@@ -33,9 +44,8 @@ open class ClientActivity : Activity() {
     private var runProgress: ProgressBar? = null
     private var taskActions: LinearLayout? = null
     private var sendButton: ImageButton? = null
-    private var creating = false
+    private val creating get() = taskCreation.get()
     private var latestRun: JSONObject? = null
-    private val navigation = mutableMapOf<String, LinearLayout>()
     private val io = Executors.newSingleThreadExecutor()
     private val handler = Handler(Looper.getMainLooper())
     private var visible = false
@@ -45,33 +55,66 @@ open class ClientActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState); gateway = Gateway(this)
         section = savedInstanceState?.getString("section") ?: "任务"
-        container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.WHITE) }
+        container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(UiTheme.background) }
         UiTheme.window(this, container)
+        window.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         setContentView(container)
-        val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(20), dp(14), dp(20), dp(14)) }
-        header.addView(UiTheme.text(this, "D", 22f, Color.WHITE, true).apply { gravity = Gravity.CENTER; background = UiTheme.surface(this@ClientActivity, UiTheme.green) }, LinearLayout.LayoutParams(dp(36), dp(36)).apply { marginEnd = dp(12) })
+        val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(8), dp(6), dp(8), dp(6)) }
+        header.addView(UiTheme.icon(this, UiIcons.menu, "导航菜单") { openNavigation() }, LinearLayout.LayoutParams(dp(48), dp(48)))
         val identity = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        identity.addView(UiTheme.text(this, clientTitle, 19f, UiTheme.ink, true))
-        status = UiTheme.text(this, connectionSummary(), 11f, UiTheme.muted).apply { setPadding(0, dp(4), 0, 0); maxLines = 2 }; identity.addView(status)
+        identity.addView(UiTheme.text(this, clientTitle, 18f, UiTheme.ink, true))
+        status = UiTheme.text(this, connectionSummary(), 10f, UiTheme.muted).apply { setPadding(0, dp(3), 0, 0); maxLines = 2 }; identity.addView(status)
         header.addView(identity, LinearLayout.LayoutParams(0, -2, 1f))
-        header.addView(UiTheme.icon(this, android.R.drawable.ic_btn_speak_now, "语音输入") { startActivity(Intent(this, VoiceActivity::class.java)) }, LinearLayout.LayoutParams(dp(44), dp(44)))
-        container.addView(header); container.addView(UiTheme.divider(this))
-        page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(20), dp(20), dp(24)) }
-        container.addView(ScrollView(this).apply { isFillViewport = true; clipToPadding = false; setBackgroundColor(UiTheme.background); addView(page) }, LinearLayout.LayoutParams(-1, 0, 1f))
-        container.addView(UiTheme.divider(this))
-        val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(8), dp(4), dp(8), dp(6)) }
-        for (name in listOf("任务", "记录", "文件", "设置") + additionalSections) {
-            val icon = when(name) { "任务" -> android.R.drawable.ic_menu_edit; "记录" -> android.R.drawable.ic_menu_recent_history; "文件" -> android.R.drawable.ic_menu_agenda; "设置" -> android.R.drawable.ic_menu_manage; else -> android.R.drawable.ic_menu_myplaces }
-            val tab = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; contentDescription = name; tooltipText = name; isFocusable = true
-                addView(ImageView(this@ClientActivity).apply { setImageResource(icon) }, LinearLayout.LayoutParams(dp(23), dp(23)).apply { gravity = Gravity.CENTER_HORIZONTAL })
-                addView(UiTheme.text(this@ClientActivity, name, 11f).apply { gravity = Gravity.CENTER; setPadding(0, dp(4), 0, 0) }, LinearLayout.LayoutParams(-1, -2))
-                setOnClickListener { selectSection(name) }
-            }
-            navigation[name] = tab; tabs.addView(tab, LinearLayout.LayoutParams(0, dp(54), 1f))
-        }
-        container.addView(tabs)
+        header.addView(UiTheme.icon(this, UiIcons.newChat, "新任务") { newConversation() }, LinearLayout.LayoutParams(dp(48), dp(48)))
+        container.addView(header)
+        page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(16), dp(20), dp(24)) }
+        conversationScroll = ScrollView(this).apply { isFillViewport = true; clipToPadding = false; addView(page) }
+        container.addView(conversationScroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        composerDock = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(6), dp(12), dp(12)) }
+        container.addView(composerDock)
         render()
+    }
+    private fun openNavigation() {
+        navigationDialog?.dismiss()
+        val dialog = android.app.Dialog(this)
+        val panel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; background = UiTheme.glass(this@ClientActivity); setPadding(dp(18), dp(20), dp(18), dp(20)) }
+        val heading = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        heading.addView(UiTheme.text(this, clientTitle, 20f, UiTheme.ink, true), LinearLayout.LayoutParams(0, -2, 1f))
+        heading.addView(UiTheme.icon(this, UiIcons.panelLeft, "关闭导航") { dialog.dismiss() }, LinearLayout.LayoutParams(dp(44), dp(44))); panel.addView(heading)
+        panel.addView(UiTheme.command(this, "新任务") { dialog.dismiss(); newConversation() }, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(20); bottomMargin = dp(18) })
+        val links = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        for (name in listOf("任务", "记录", "文件", "设置") + additionalSections) {
+            val icon = when(name) { "任务" -> UiIcons.newChat; "记录" -> android.R.drawable.ic_menu_recent_history; "文件" -> android.R.drawable.ic_menu_agenda; "设置" -> android.R.drawable.ic_menu_manage; else -> android.R.drawable.ic_menu_myplaces }
+            val row = UiTheme.row(this, name, "", icon) { dialog.dismiss(); selectSection(name) }.apply { contentDescription = name }
+            if (name == section) row.background = UiTheme.glass(this, 16)
+            links.addView(row)
+        }
+        panel.addView(ScrollView(this).apply { addView(links) }, LinearLayout.LayoutParams(-1, 0, 1f))
+        panel.addView(UiTheme.text(this, connectionSummary(), 12f, UiTheme.muted).apply { setPadding(dp(6), dp(18), dp(6), 0) })
+        dialog.setContentView(panel); dialog.window?.let { UiTheme.styleSheet(it); it.setGravity(Gravity.START); it.setLayout(minOf(dp(310), resources.displayMetrics.widthPixels - dp(36)), -1) }
+        dialog.show(); dialog.window?.setLayout(minOf(dp(310), resources.displayMetrics.widthPixels - dp(36)), -1); navigationDialog = dialog
+    }
+    private fun saveDraft() { synchronized(draftLock) { reconcileSubmittedDraft(); goal?.let { gateway.prefs.edit().putString("draft_goal", it.text.toString()).apply() } } }
+    private fun newConversation() {
+        saveDraft()
+        if (creating) { status.text = "正在创建任务，请稍候"; return }
+        val id = gateway.prefs.getString("active_run", "").orEmpty()
+        fun clear() { latestRun = null; gateway.prefs.edit().remove("active_run").putString("draft_goal", "").apply(); goal = null; selectSection("任务") }
+        fun confirmClear() {
+            if (gateway.prefs.getString("draft_goal", "").isNullOrBlank()) clear()
+            else AlertDialog.Builder(this).setTitle("开始新任务？").setMessage("当前草稿将被清除。").setNegativeButton("保留草稿", null).setPositiveButton("新任务") { _, _ -> clear() }.show()
+        }
+        if (id.isBlank()) { confirmClear(); return }
+        async({ gateway.request("GET", "/runs/$id") }) { run ->
+            if (gateway.prefs.getString("active_run", "") != id) return@async
+            latestRun = run
+            if (run.optString("status") in setOf("completed", "failed", "cancelled")) confirmClear()
+            else AlertDialog.Builder(this).setTitle("当前任务尚未结束").setMessage("停止当前任务后才能开始新任务。").setNegativeButton("返回当前任务") { _, _ -> selectSection("任务") }
+                .setPositiveButton("停止并新建") { _, _ ->
+                    DeviceWorkerService.instance?.cancel()
+                    async({ gateway.request("POST", "/runs/$id/cancel", JSONObject()) }) { if (gateway.prefs.getString("active_run", "") == id) clear() }
+                }.show()
+        }
     }
     protected fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
     protected fun label(text: String, size: Float = 15f): TextView = UiTheme.text(this, text, size, UiTheme.ink, size >= 18f).apply { setPadding(0, dp(8), 0, dp(12)); page.addView(this) }
@@ -79,7 +122,11 @@ open class ClientActivity : Activity() {
     protected fun button(text: String, action: () -> Unit): Button = UiTheme.command(this, text, action = action).apply { page.addView(this, LinearLayout.LayoutParams(-1, dp(46)).apply { topMargin = dp(6); bottomMargin = dp(6) }) }
     protected fun sectionLabel(text: String) { page.addView(UiTheme.text(this, text, 12f, UiTheme.muted, true).apply { setPadding(0, dp(22), 0, dp(6)) }) }
     protected fun settingsRow(title: String, detail: String, icon: Int = android.R.drawable.ic_menu_manage, action: () -> Unit) { page.addView(UiTheme.row(this, title, detail, icon, action)); page.addView(UiTheme.divider(this)) }
-    protected fun selectSection(name: String) { goal?.let { gateway.prefs.edit().putString("draft_goal", it.text.toString()).apply() }; section = name; render() }
+    protected fun selectSection(name: String) {
+        if (creating && name in additionalSections) { status.text = "任务创建中，暂不可更换账号"; return }
+        if (name == "任务") workerStartDeferred = false
+        saveDraft(); section = name; render(); conversationScroll.scrollTo(0, 0)
+    }
     protected fun connectionSummary(): String = when {
         gateway.prefs.getString("token", "").isNullOrBlank() -> "尚未连接"
         gateway.prefs.getString("device_id", "").isNullOrBlank() -> "等待绑定设备"
@@ -124,78 +171,150 @@ open class ClientActivity : Activity() {
     protected open fun customPage(section: String) {}
     private fun render() {
         page.removeAllViews(); goal = null; runView = null; runControls = null; runTitle = null; runGoal = null; runProgress = null; taskActions = null; sendButton = null; lastPending = ""
-        navigation.forEach { (name, tab) ->
-            val selected = name == section; tab.isSelected = selected; tab.background = UiTheme.surface(this, if (selected) UiTheme.pale else Color.TRANSPARENT)
-            (tab.getChildAt(0) as ImageView).imageTintList = ColorStateList.valueOf(if (selected) UiTheme.green else UiTheme.muted)
-            (tab.getChildAt(1) as TextView).setTextColor(if (selected) UiTheme.green else UiTheme.muted)
-        }
+        composerDock.removeAllViews(); composerDock.visibility = if (section == "任务") View.VISIBLE else View.GONE
+        emptyConversation = null; conversationContent = null
         when(section) { "任务" -> tasks(); "设置" -> settings(); "记录" -> history(); "文件" -> documents(); else -> customPage(section) }
     }
     private fun tasks() {
-        label("任务", 24f)
-        val composer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; background = UiTheme.surface(this@ClientActivity, Color.WHITE, true); setPadding(dp(14), dp(14), dp(10), dp(10)) }
-        goal = UiTheme.field(this, "输入这次要完成的任务", gateway.prefs.getString("draft_goal", "").orEmpty()).apply { minLines = 4; maxLines = 8; gravity = Gravity.TOP; background = null; setPadding(dp(2), dp(2), dp(2), dp(12)) }
+        val empty = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(12), dp(24), dp(12), dp(36)) }
+        empty.addView(ImageView(this).apply { setImageResource(UiIcons.sparkles); imageTintList = ColorStateList.valueOf(UiTheme.ink) }, LinearLayout.LayoutParams(dp(36), dp(36)).apply { gravity = Gravity.CENTER_HORIZONTAL; bottomMargin = dp(20) })
+        empty.addView(UiTheme.text(this, "有什么需要帮忙的？", 23f, UiTheme.ink, true).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(-1, -2))
+        page.addView(empty, LinearLayout.LayoutParams(-1, 0, 1f)); emptyConversation = empty
+        val messages = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
+        page.addView(messages, LinearLayout.LayoutParams(-1, -2)); conversationContent = messages
+        val userRow = LinearLayout(this).apply { gravity = Gravity.END; setPadding(dp(32), dp(8), 0, dp(26)) }
+        runGoal = UiTheme.text(this, "", 15f).apply { background = UiTheme.glass(this@ClientActivity, 20); setPadding(dp(16), dp(13), dp(16), dp(13)); setTextIsSelectable(true) }
+        userRow.addView(runGoal, LinearLayout.LayoutParams(-2, -2)); messages.addView(userRow)
+        val assistantHeading = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        assistantHeading.addView(ImageView(this).apply { setImageResource(UiIcons.sparkles); imageTintList = ColorStateList.valueOf(UiTheme.ink) }, LinearLayout.LayoutParams(dp(22), dp(22)).apply { marginEnd = dp(10) })
+        runTitle = UiTheme.text(this, "", 14f, UiTheme.ink, true); assistantHeading.addView(runTitle, LinearLayout.LayoutParams(0, -2, 1f))
+        runProgress = ProgressBar(this).apply { isIndeterminate = true; indeterminateTintList = ColorStateList.valueOf(UiTheme.muted); visibility = View.GONE }
+        assistantHeading.addView(runProgress, LinearLayout.LayoutParams(dp(18), dp(18))); messages.addView(assistantHeading)
+        runView = UiTheme.text(this, "", 16f).apply { setLineSpacing(dp(4).toFloat(), 1f); setTextIsSelectable(true); setPadding(0, dp(14), 0, dp(8)) }; messages.addView(runView)
+        val composer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; background = UiTheme.glass(this@ClientActivity)
+            elevation = dp(5).toFloat(); outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
+            if (Build.VERSION.SDK_INT >= 28) { outlineAmbientShadowColor = Color.argb(65, 98, 108, 130); outlineSpotShadowColor = Color.argb(55, 98, 108, 130) }
+            setPadding(dp(14), dp(8), dp(8), dp(8))
+        }
+        goal = UiTheme.field(this, "发送任务", gateway.prefs.getString("draft_goal", "").orEmpty()).apply { contentDescription = "任务输入"; minLines = 1; maxLines = 4; gravity = Gravity.TOP; background = null; setPadding(dp(4), dp(10), dp(4), dp(8)) }
+        goal?.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { synchronized(draftLock) { gateway.prefs.edit().putString("draft_goal", s?.toString().orEmpty()).apply() } }
+            override fun afterTextChanged(s: android.text.Editable?) {}
+        })
         composer.addView(goal, LinearLayout.LayoutParams(-1, -2))
         val composerTools = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val modeNames = listOf("请求批准", "帮我批准", "完全访问")
+        val mode = UiTheme.text(this, modeNames[gateway.prefs.getInt("mode_index", 1).coerceIn(0, 2)], 12f, UiTheme.muted).apply {
+            gravity = Gravity.CENTER_VERTICAL; setPadding(dp(8), 0, dp(8), 0); minHeight = dp(44); isFocusable = true; contentDescription = "执行模式"; tooltipText = "执行模式"
+            setCompoundDrawablesRelativeWithIntrinsicBounds(0, 0, UiIcons.chevronDown, 0); compoundDrawablePadding = dp(5)
+            setOnClickListener {
+                AlertDialog.Builder(this@ClientActivity).setTitle("执行模式").setSingleChoiceItems(modeNames.toTypedArray(), gateway.prefs.getInt("mode_index", 1).coerceIn(0, 2)) { dialog, which ->
+                    gateway.prefs.edit().putInt("mode_index", which).apply(); text = modeNames[which]; dialog.dismiss()
+                }.setNegativeButton("关闭", null).show()
+            }
+        }
+        composerTools.addView(mode, LinearLayout.LayoutParams(0, dp(44), 1f))
         composerTools.addView(UiTheme.icon(this, android.R.drawable.ic_btn_speak_now, "语音输入") { startActivity(Intent(this, VoiceActivity::class.java)) }, LinearLayout.LayoutParams(dp(44), dp(44)))
-        composerTools.addView(UiTheme.text(this, "新任务", 12f, UiTheme.muted), LinearLayout.LayoutParams(0, -2, 1f))
-        sendButton = UiTheme.icon(this, android.R.drawable.ic_menu_send, "开始任务", true) {
+        sendButton = UiTheme.icon(this, UiIcons.arrowUp, "开始任务", true) {
             val value = goal?.text.toString().trim()
             val device = gateway.prefs.getString("device_id", "").orEmpty()
             if (value.isBlank()) { goal?.error = "请输入任务"; return@icon }
             if (device.isBlank()) { status.text = "请先连接并绑定设备"; selectSection("设置"); return@icon }
             if (DoppelAccessibilityService.instance == null) { status.text = "请先启用无障碍服务"; selectSection("设置"); return@icon }
             if (creating) return@icon
-            creating = true; sendButton?.isEnabled = false
+            val active = gateway.prefs.getString("active_run", "").orEmpty()
+            if (active.isNotBlank() && (latestRun?.optString("id") != active || latestRun?.optString("status") !in setOf("completed", "failed", "cancelled"))) {
+                status.text = "当前任务尚未结束"; refreshRun(); return@icon
+            }
+            if (!taskCreation.compareAndSet(false, true)) return@icon
+            sendButton?.isEnabled = false
             val selected = gateway.prefs.getInt("mode_index", 1).coerceIn(0, 2)
-            gateway.prefs.edit().putString("draft_goal", value).apply()
-            async({ try { gateway.request("POST", "/runs", JSONObject().put("device_id", device).put("goal", value).put("mode", listOf("ask", "assist", "full")[selected])) } finally { runOnUiThread { creating = false; sendButton?.isEnabled = true } } }) {
-                gateway.prefs.edit().putString("active_run", it.getString("id")).putString("draft_goal", "").apply(); goal?.setText(""); startForegroundService(Intent(this, DeviceWorkerService::class.java)); displayRun(it)
+            saveDraft()
+            async({
+                try {
+                    val run = gateway.request("POST", "/runs", JSONObject().put("device_id", device).put("goal", value).put("mode", listOf("ask", "assist", "full")[selected]))
+                    synchronized(draftLock) {
+                        val editor = gateway.prefs.edit().putString("active_run", run.getString("id"))
+                        if (gateway.prefs.getString("draft_goal", "").orEmpty().trim() == value) editor.putString("draft_goal", "")
+                        submittedDraft.set(run.getString("id") to value)
+                        editor.commit()
+                    }
+                    pendingWorkerRun.set(run.getString("id"))
+                    run
+                } finally {
+                    taskCreation.set(false)
+                    runOnUiThread { if (!isDestroyed) sendButton?.isEnabled = true }
+                }
+            }) {
+                reconcileSubmittedDraft()
+                displayRun(it); startCreatedWorker(it)
             }
         }
-        composerTools.addView(sendButton, LinearLayout.LayoutParams(dp(44), dp(44))); composer.addView(composerTools); page.addView(composer)
-        sectionLabel("执行模式")
-        val modes = RadioGroup(this).apply { orientation = LinearLayout.HORIZONTAL; background = UiTheme.surface(this@ClientActivity, UiTheme.line); setPadding(dp(3), dp(3), dp(3), dp(3)) }
-        listOf("请求批准", "帮我批准", "完全访问").forEachIndexed { index, name ->
-            modes.addView(RadioButton(this).apply {
-                id = View.generateViewId(); text = name; textSize = 12f; gravity = Gravity.CENTER; setPadding(0, 0, 0, 0); buttonDrawable = null; isChecked = gateway.prefs.getInt("mode_index", 1) == index
-                fun style() { background = UiTheme.surface(this@ClientActivity, if (isChecked) Color.WHITE else Color.TRANSPARENT); setTextColor(if (isChecked) UiTheme.green else UiTheme.muted) }
-                style(); setOnCheckedChangeListener { _, checked -> style(); if (checked) gateway.prefs.edit().putInt("mode_index", index).apply() }
-            }, LinearLayout.LayoutParams(0, dp(38), 1f))
-        }; page.addView(modes)
-        sectionLabel("当前进度")
-        runTitle = UiTheme.text(this, "暂无进行中的任务", 18f, UiTheme.ink, true).also { page.addView(it, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) }) }
-        runGoal = UiTheme.text(this, "", 14f, UiTheme.muted).also { page.addView(it, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }) }
-        runProgress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { isIndeterminate = true; indeterminateTintList = ColorStateList.valueOf(UiTheme.green); visibility = View.GONE }.also { page.addView(it, LinearLayout.LayoutParams(-1, dp(3)).apply { topMargin = dp(14); bottomMargin = dp(10) }) }
-        runView = UiTheme.text(this, connectionSummary(), 14f, UiTheme.muted).also { page.addView(it, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) }) }
-        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.END; visibility = View.GONE }; page.addView(actions, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(8) }); taskActions = actions
+        sendButton?.isEnabled = !creating
+        composerTools.addView(sendButton, LinearLayout.LayoutParams(dp(44), dp(44))); composer.addView(composerTools); composerDock.addView(composer)
+        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.START; visibility = View.GONE }; messages.addView(actions, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) }); taskActions = actions
         for ((text, operation, icon) in listOf(Triple("暂停", "pause", android.R.drawable.ic_media_pause), Triple("继续", "resume", android.R.drawable.ic_media_play), Triple("取消", "cancel", android.R.drawable.ic_menu_close_clear_cancel))) actions.addView(UiTheme.icon(this, icon, text) {
             val run = gateway.prefs.getString("active_run", "").orEmpty(); if (run.isBlank()) return@icon
             if (operation != "resume") DeviceWorkerService.instance?.cancel()
             async({ gateway.request("POST", "/runs/$run/$operation", JSONObject()) }) { displayRun(it); if (operation == "resume") startForegroundService(Intent(this@ClientActivity, DeviceWorkerService::class.java)) }
         }, LinearLayout.LayoutParams(dp(48), dp(48)))
-        runControls = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }; page.addView(runControls)
-        latestRun?.let { displayRun(it) }
+        runControls = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }; messages.addView(runControls, messages.indexOfChild(actions))
+        val active = gateway.prefs.getString("active_run", "").orEmpty()
+        latestRun?.takeIf { it.optString("id") == active }?.let { displayRun(it) }
+        if (active.isNotBlank() && latestRun?.optString("id") != active) { empty.visibility = View.GONE; messages.visibility = View.VISIBLE; runTitle?.text = "正在读取任务"; runProgress?.visibility = View.VISIBLE }
         refreshRun()
     }
     private fun refreshRun() {
-        if (section != "任务" || polling) return
+        reconcileSubmittedDraft()
+        sendButton?.isEnabled = !creating
+        if ((section != "任务" && pendingWorkerRun.get() == null) || polling) return
         val id = gateway.prefs.getString("active_run", "").orEmpty(); if (id.isEmpty()) return
         polling = true
         io.execute {
-            try { val run = gateway.request("GET", "/runs/$id"); runOnUiThread { if (!isDestroyed && section == "任务") displayRun(run) } }
+            try { val run = gateway.request("GET", "/runs/$id"); runOnUiThread {
+                if (!isDestroyed && gateway.prefs.getString("active_run", "") == id) { if (section == "任务") displayRun(run); startCreatedWorker(run) }
+            } }
             catch (_: Exception) { runOnUiThread { if (!isDestroyed) status.text = "任务状态暂不可用" } }
             finally { polling = false }
         }
     }
+    private var workerStartDeferred = false
+    private fun startCreatedWorker(run: JSONObject) {
+        val id = run.getString("id")
+        val pending = pendingWorkerRun.get()
+        if (pending != id) return
+        if (run.optString("status") in setOf("completed", "failed", "cancelled")) { pendingWorkerRun.compareAndSet(pending, null); return }
+        if (!visible || isFinishing || isDestroyed || workerStartDeferred || gateway.prefs.getString("active_run", "") != id) return
+        try {
+            startForegroundService(Intent(this, DeviceWorkerService::class.java))
+            pendingWorkerRun.compareAndSet(pending, null)
+        } catch (_: IllegalStateException) { workerStartDeferred = true; status.text = "服务未启动，请返回任务页重试" }
+        catch (_: SecurityException) { workerStartDeferred = true; status.text = "服务权限不可用，请检查设置" }
+    }
+    private fun reconcileSubmittedDraft() {
+        val submitted = submittedDraft.get() ?: return
+        if (gateway.prefs.getString("active_run", "") != submitted.first) return
+        val field = goal ?: return
+        synchronized(draftLock) {
+            if (gateway.prefs.getString("draft_goal", "").isNullOrBlank() && field.text.toString().trim() == submitted.second) field.setText("")
+        }
+        submittedDraft.compareAndSet(submitted, null)
+    }
     private fun displayRun(run: JSONObject) {
         latestRun = run
+        emptyConversation?.visibility = View.GONE; conversationContent?.visibility = View.VISIBLE
         val state = run.optString("status")
         val translated = mapOf("queued" to "排队中", "running" to "执行中", "paused" to "已暂停", "awaiting_approval" to "等待批准", "awaiting_input" to "需要补充信息", "completed" to "已完成", "failed" to "失败", "cancelled" to "已取消")
         runTitle?.text = translated[state] ?: state
         runTitle?.setTextColor(when (state) { "failed" -> UiTheme.danger; "running", "completed" -> UiTheme.green; else -> UiTheme.ink })
         runGoal?.text = run.optString("goal")
-        runView?.text = run.optString("message").ifBlank { if (state == "running") "正在处理任务" else "" }; status.text = connectionSummary()
+        runView?.apply {
+            text = run.optString("message").ifBlank { if (state == "running") "正在处理任务" else "" }
+            visibility = if (text.isBlank()) View.GONE else View.VISIBLE
+        }
+        status.text = connectionSummary()
         runProgress?.visibility = if (state in setOf("running", "queued")) View.VISIBLE else View.GONE
         taskActions?.visibility = if (state in setOf("running", "queued", "paused", "awaiting_input", "awaiting_approval")) View.VISIBLE else View.GONE
         taskActions?.let { actions -> actions.getChildAt(0).isEnabled = state == "running"; actions.getChildAt(1).isEnabled = state == "paused" }
@@ -222,6 +341,7 @@ open class ClientActivity : Activity() {
         sectionLabel("设备连接")
         settingsRow("网关连接", gateway.prefs.getString("base_url", "http://10.0.2.2:8765").orEmpty(), android.R.drawable.ic_menu_share) { connectionDialog() }
         settingsRow("绑定本机", if (gateway.prefs.getString("device_id", "").isNullOrBlank()) "尚未绑定" else "当前设备已绑定", android.R.drawable.ic_menu_mylocation) {
+            if (creating) { status.text = "任务创建中，暂不可重新绑定"; return@settingsRow }
             var installation = gateway.prefs.getString("installation_id", null)
             if (installation == null) { installation = UUID.randomUUID().toString(); gateway.prefs.edit().putString("installation_id", installation).commit() }
             val identity = installation
@@ -265,6 +385,7 @@ open class ClientActivity : Activity() {
         val token = if (showTokenSetting) UiTheme.field(this, "网关令牌", gateway.prefs.getString("token", "").orEmpty(), true).also { fields.addView(it, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) }) } else null
         val dialog = AlertDialog.Builder(this).setTitle("网关连接").setView(fields).setNegativeButton("取消", null).setPositiveButton("保存连接", null).create()
         dialog.setOnShowListener { dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            if (creating) { status.text = "任务创建中，暂不可更换连接"; return@setOnClickListener }
             val value = base.text.toString().trim().trimEnd('/')
             val uri = try { java.net.URI(value) } catch (_: Exception) { null }
             if (uri == null || uri.scheme !in setOf("http", "https") || uri.host == null || uri.userInfo != null) { base.error = "请输入有效的服务地址"; return@setOnClickListener }
@@ -416,8 +537,9 @@ open class ClientActivity : Activity() {
             }.setNegativeButton("关闭", null).show()
         }
     }
-    override fun onResume() { super.onResume(); visible = true; goal?.setText(gateway.prefs.getString("draft_goal", "")); if (section == "设置") render(); status.text = connectionSummary(); handler.post(poll) }
-    override fun onSaveInstanceState(outState: Bundle) { outState.putString("section", section); super.onSaveInstanceState(outState) }
-    override fun onPause() { visible = false; handler.removeCallbacks(poll); goal?.let { gateway.prefs.edit().putString("draft_goal", it.text.toString()).apply() }; super.onPause() }
-    override fun onDestroy() { handler.removeCallbacksAndMessages(null); io.shutdown(); super.onDestroy() }
+    override fun onResume() { super.onResume(); visible = true; workerStartDeferred = false; goal?.setText(gateway.prefs.getString("draft_goal", "")); if (section == "设置") render(); status.text = connectionSummary(); handler.post(poll) }
+    @Deprecated("Platform callback") override fun onBackPressed() { if (section != "任务") selectSection("任务") else super.onBackPressed() }
+    override fun onSaveInstanceState(outState: Bundle) { saveDraft(); outState.putString("section", section); super.onSaveInstanceState(outState) }
+    override fun onPause() { visible = false; handler.removeCallbacks(poll); saveDraft(); super.onPause() }
+    override fun onDestroy() { navigationDialog?.dismiss(); handler.removeCallbacksAndMessages(null); io.shutdown(); super.onDestroy() }
 }
