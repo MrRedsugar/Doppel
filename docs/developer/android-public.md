@@ -15,8 +15,9 @@ pause/resume/cancel, approval and human takeover controls. Translucent sheets an
 restrained highlights share a neutral theme with the voice and login settings.
 
 Android 31+ can apply system window background blur behind sheets when the device
-and system settings support it. Earlier versions use the readable translucent
-background and dimming fallback; no screenshot is taken to create the effect.
+and system settings support it. Earlier versions use glass highlights over an
+opaque backing and dimming fallback, keeping underlying text from bleeding
+through. No screenshot is taken to create the effect.
 The LDPlayer validation target runs API 28 and exercises only that fallback, not
 actual system background blur.
 

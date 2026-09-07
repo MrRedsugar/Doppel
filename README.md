@@ -5,6 +5,12 @@ uses stable targets, executes authorized actions and checks results. The public
 package includes a standalone developer gateway, Android developer frontend,
 isolated test app, MCP extensions and batch workbook tools.
 
+Alpha.3 introduces a conversation-first Android interface with a pinned glass
+composer, sidebar navigation, a voice sheet and Lucide icons. Drafts and created
+tasks survive Activity recreation; a task that finishes creation in the background
+waits for the visible client before starting its device worker. See the
+[Android interface guide](docs/developer/android.md).
+
 The alpha.2 Android workspace adds visible tap/long-press/scroll feedback,
 explicit verification takeover, and encrypted device-local phone profiles with
 one-use SMS notification assistance. The developer usage page shows unlimited
@@ -35,6 +41,14 @@ explicit Android grants. Payment is always manual; avoid testing real social
 messages. Simulated test-app results do not establish real-app compatibility.
 
 ## Observed verification
+
+For alpha.3, 30 SDK JVM tests and six LDPlayer device cases passed, covering
+draft navigation/recreation, delayed creation and duplicate prevention, background
+worker deferral, manual takeover, synthetic notification login, and voice task
+confirmation with return to the previous app. Layouts were inspected at 411dp and
+320dp with a visible software keyboard. API 28 uses the visual glass fallback;
+API 31+ system blur and API 35 keyboard insets still need a matching device.
+No paid model or real external-app task was used for this UI update.
 
 For alpha.2, SDK tests cover 29 cases. LDPlayer instrumentation passed six
 device cases, including synthetic SMS login, actual tap/long-press/scroll cursor
