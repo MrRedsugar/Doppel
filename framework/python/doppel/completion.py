@@ -5,7 +5,7 @@ import json
 import secrets
 
 from .errors import Conflict
-from .models import Observation, Run
+from .models import Observation, Run, TaskStateUpdate
 
 
 def record_evidence(runtime, run_id, tool, arguments, result):
@@ -33,11 +33,12 @@ def record_evidence(runtime, run_id, tool, arguments, result):
     return dict(result, evidence_id=detail["id"])
 
 
-def finish_task(runtime, run_id, outcome, summary, evidence_ids):
+def finish_task(runtime, run_id, outcome, summary, evidence_ids, task_state=None):
     if outcome not in {"completed", "failed"} or not isinstance(summary, str) or not summary.strip() or len(summary) > 12000:
         raise ValueError("A valid outcome and nonblank summary are required")
     if not isinstance(evidence_ids, list) or len(evidence_ids) > 20 or any(not isinstance(item, str) for item in evidence_ids):
         raise ValueError("Invalid evidence IDs")
+    state_update = TaskStateUpdate.model_validate(task_state).model_dump(exclude_unset=True, exclude_none=True) if task_state is not None else {}
     with runtime.store.transaction() as db:
         row = db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
         run = Run.model_validate_json(row["payload"])
@@ -64,6 +65,7 @@ def finish_task(runtime, run_id, outcome, summary, evidence_ids):
                     path = runtime.config.data_dir / "documents" / row["owner"] / item["document"]
                     if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != item["digest"]:
                         raise ValueError("Document evidence changed; inspect the result again")
+        run.task_state.update(state_update)
         run.status, run.message, run.pending_request = outcome, summary.strip(), None
         runtime.store.event(db, run_id, "finish", summary.strip(), {"evidence_ids": evidence_ids, "outcome": outcome})
         runtime._update(db, run)

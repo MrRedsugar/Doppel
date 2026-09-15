@@ -16,9 +16,15 @@ class ExtensionInput(Model):
     read_only_tools: list[str] = Field(default_factory=list, max_length=100)
 
 
+class ExtensionUpdate(ExtensionInput):
+    expected_revision: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
+
+
 def create_extension_router(runtime, owner_dependency):
     manager = get_extension_manager(runtime)
     router = APIRouter(route_class=CheckedRoute)
+    from .skill_api import create_skill_router
+    router.include_router(create_skill_router(runtime, owner_dependency))
 
     @router.get('/extensions')
     def configurations(owner=Depends(owner_dependency)):
@@ -29,8 +35,9 @@ def create_extension_router(runtime, owner_dependency):
         return manager.create_config(owner, body.model_dump())
 
     @router.put('/extensions/{name}')
-    def update(name: str, body: ExtensionInput, owner=Depends(owner_dependency)):
-        return manager.update_config(owner, name, body.model_dump())
+    def update(name: str, body: ExtensionUpdate, owner=Depends(owner_dependency)):
+        return manager.update_config(owner, name, body.model_dump(exclude={'expected_revision'}),
+                                     expected_revision=body.expected_revision)
 
     @router.delete('/extensions/{name}')
     def delete(name: str, owner=Depends(owner_dependency)):

@@ -13,8 +13,36 @@ import tempfile
 MODULES = {
     '__init__', 'cli', 'completion', 'document_api', 'documents', 'errors', 'extension_api',
     'extension_runtime', 'extensions', 'gateway', 'harness', 'harness_worker',
-    'internal', 'mcp_server', 'model_context', 'model_proxy', 'models', 'perception', 'policy',
-    'retention', 'runtime', 'skills', 'store', 'tool_outcomes',
+    'internal', 'intent', 'mcp_server', 'model_context', 'model_proxy', 'models', 'perception', 'policy',
+    'providers', 'retention', 'runtime', 'scheduler', 'skills', 'skill_api', 'skill_library', 'speech_api', 'store', 'tool_outcomes',
+}
+GUI_GROUNDING_FILES = {
+    'integrations/gui_grounding/README.md',
+    'integrations/gui_grounding/THIRD_PARTY_NOTICES.md',
+    'integrations/gui_grounding/requirements.txt',
+    'integrations/gui_grounding/start.ps1',
+    'integrations/gui_grounding/stop.ps1',
+    'integrations/gui_grounding/models.py',
+    'integrations/gui_grounding/prompts.py',
+    'integrations/gui_grounding/fetch.py',
+    'integrations/gui_grounding/protocol.py',
+    'integrations/gui_grounding/patch_projection.py',
+    'integrations/gui_grounding/process_guard.py',
+    'integrations/gui_grounding/inference.py',
+    'integrations/gui_grounding/refinement.py',
+    'integrations/gui_grounding/server.py',
+    'integrations/gui_grounding/evaluate.py',
+    'integrations/gui_grounding/tests/test_fetch.py',
+    'integrations/gui_grounding/tests/test_protocol.py',
+    'integrations/gui_grounding/tests/test_patch_projection.py',
+    'integrations/gui_grounding/tests/test_process_guard.py',
+    'integrations/gui_grounding/tests/test_server.py',
+    'integrations/gui_grounding/tests/test_refinement.py',
+    'integrations/gui_grounding/tests/test_inference_lifecycle.py',
+    'integrations/gui_grounding/licenses/MAI-UI-Apache-2.0.txt',
+    'integrations/gui_grounding/licenses/MAI-UI-NOTICE.txt',
+    'integrations/gui_grounding/licenses/GUI-Owl-MIT.txt',
+    'docs/developer/gui-grounding.md',
 }
 FILES = {
     '.github/workflows/verify-public.yml',
@@ -29,15 +57,36 @@ FILES = {
     'docs/developer/open-source.md', 'docs/developer/public-readme.md',
     'docs/developer/data-retention.md',
     'docs/developer/interaction-login.md',
+    'docs/developer/payment-delegation.md',
+    'docs/developer/cloud-speech.md',
+    'docs/developer/phone-direct.md', 'docs/developer/release-hardening.md', 'docs/developer/schedules.md',
+    'docs/developer/model-connections.md',
+    'docs/developer/device-compatibility.md',
+    'docs/developer/direct-skills.md', 'docs/developer/web-research.md',
+    'docs/developer/perception-efficiency.md',
+    'docs/developer/app-learning.md',
+    'docs/developer/continuous-conversations.md',
+    'docs/developer/device-lab.md', 'docs/architecture/adaptive-visual-control.md',
+    'scripts/device-lab.py', 'tests/test_device_lab.py',
+    'scripts/device-lab-ui.py', 'tests/test_device_lab_ui.py',
+    'docs/architecture/planned-control.md', 'docs/developer/local-visual-motor.md',
+    'scripts/adb-shell-bridge.ps1', 'scripts/adb-wireless-shell-bridge.ps1',
+    'docs/developer/adb-shell-bridge.md', 'docs/licenses/adb-shell-bridge.md',
+    'android/sdk/consumer-rules.pro',
+    'scripts/prepare-embedded-tts.py', 'scripts/verify-embedded-tts.py',
+    'scripts/prepare-embedded-asr.py', 'scripts/verify-embedded-asr.py', 'tests/test_prepare_embedded_asr.py',
+    'docs/licenses/embedded-chinese-asr.txt', 'docs/architecture/qwen-device-loop.md',
+    'docs/licenses/embedded-chinese-tts.txt', 'docs/developer/embedded-chinese-tts.md',
     'docs/architecture/public-system.md', 'docs/contracts/public-http-v1.md',
     'scripts/export-public.py',
-}
+} | GUI_GROUNDING_FILES
 IGNORED = {'build', '__pycache__', '.gradle', '.kotlin', '.pytest_cache', '.git', 'node_modules'}
 ANDROID_LICENSES = {
     'NOTICE.txt', 'Apache-2.0.txt', 'JNA-LICENSE.txt', 'OpenBLAS-LICENSE.txt',
     'CLAPACK-COPYING.txt', 'F2C-NOTICE.txt', 'libffi-LICENSE.txt',
     'libcxx-LICENSE.txt', 'libcxxabi-LICENSE.txt', 'libunwind-LICENSE.txt',
     'Lucide-LICENSE.txt', 'Lucide-PROVENANCE.txt',
+    'jsoup-LICENSE.txt', 'MPL-2.0.txt',
 }
 ANDROID_SETTINGS = '''pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
 dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
@@ -56,6 +105,8 @@ def allowed(path: Path) -> bool:
         return True
     if path.parent.as_posix() == 'android/sdk/src/main/assets/third_party':
         return path.name in ANDROID_LICENSES
+    if name.startswith('android/sdk/src/main/assets/skills/'):
+        return path.suffix == '.md'
     if path.parent.as_posix() == 'framework/python/doppel':
         return path.suffix == '.py' and path.stem in MODULES
     if name.startswith('framework/tests/'):
@@ -103,8 +154,18 @@ def export_public(source: str | Path, output: str | Path) -> dict:
             selected.append((relative, data))
     available = {path.as_posix() for path, _ in selected}
     required = {'framework/pyproject.toml', 'framework/LICENSE', 'framework/NOTICE', 'framework/THIRD_PARTY_NOTICES.md',
-                'framework/python/doppel/cli.py', 'android/sdk/build.gradle.kts',
-                'android/developer-app/build.gradle.kts', 'android/test-app/build.gradle.kts', 'docs/developer/public-readme.md'}
+                'framework/python/doppel/cli.py', 'framework/python/doppel/providers.py', 'android/sdk/build.gradle.kts',
+                'android/developer-app/build.gradle.kts', 'android/test-app/build.gradle.kts', 'docs/developer/public-readme.md',
+                'scripts/prepare-embedded-tts.py', 'scripts/verify-embedded-tts.py',
+                'scripts/prepare-embedded-asr.py', 'scripts/verify-embedded-asr.py', 'tests/test_prepare_embedded_asr.py',
+                'docs/licenses/embedded-chinese-asr.txt', 'docs/architecture/qwen-device-loop.md', 'docs/developer/model-connections.md',
+                'docs/licenses/embedded-chinese-tts.txt', 'docs/developer/embedded-chinese-tts.md',
+                'docs/developer/device-compatibility.md',
+                'docs/developer/web-research.md', 'docs/developer/direct-skills.md', 'docs/developer/schedules.md',
+                'docs/architecture/planned-control.md', 'docs/developer/local-visual-motor.md',
+                'scripts/device-lab-ui.py', 'tests/test_device_lab_ui.py',
+                'scripts/adb-shell-bridge.ps1', 'scripts/adb-wireless-shell-bridge.ps1',
+                'docs/developer/adb-shell-bridge.md', 'docs/licenses/adb-shell-bridge.md'} | GUI_GROUNDING_FILES
     if not required <= available:
         raise ValueError('Missing required public source: ' + ', '.join(sorted(required - available)))
     output.parent.mkdir(parents=True, exist_ok=True)

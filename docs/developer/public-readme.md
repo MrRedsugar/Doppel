@@ -5,17 +5,44 @@ uses stable targets, executes authorized actions and checks results. The public
 package includes a standalone developer gateway, Android developer frontend,
 isolated test app, MCP extensions and batch workbook tools.
 
-Alpha.3 introduces a conversation-first Android interface with a pinned glass
-composer, sidebar navigation, a voice sheet and Lucide icons. Drafts and created
-tasks survive Activity recreation; a task that finishes creation in the background
-waits for the visible client before starting its device worker. See the
-[Android interface guide](docs/developer/android.md).
+The active Android direct path is `DirectRuntime → SplitTaskEngine`, using the
+platforms and models selected in [Model Connections](docs/developer/model-connections.md).
+With visual enhancement enabled, A decides and stateless B grounds the action;
+with it disabled, A returns action coordinates directly. Phone-local orchestration
+requires network access to the configured model APIs, but no always-on computer
+or self-hosted kernel service. It does not run hosted MCP tools or workbook batching.
 
-The alpha.2 Android workspace adds visible tap/long-press/scroll feedback,
-explicit verification takeover, and encrypted device-local phone profiles with
-one-use SMS notification assistance. The developer usage page shows unlimited
-test points and retained actual token usage; provider charges still apply.
-See [Interaction and Login Assistance](docs/developer/interaction-login.md).
+Verification is version-specific. Historical test counts and real-app measurements
+below belong to their named snapshots, not the current version; consult the
+corresponding version's verification records for its results. See
+[Phone Direct Mode](docs/developer/phone-direct.md) and
+[Device Compatibility](docs/developer/device-compatibility.md) for current setup
+and the distinction between fixture coverage and real-device acceptance.
+
+The 15 retired implementation files contain 17 top-level classes, including
+`DirectTaskEngine`, `VisualAgentLoop` and `LocalVisualMotor`, and now live in
+`android/sdk/src/test/java/dev/doppel/sdk/legacy`. They retain package
+`dev.doppel.sdk` for JVM regression tests and are not production APK/AAR classes.
+The old `LearningLiveTest` and `PerceptionLiveTest` are archived in the private
+workspace at `labs/legacy-direct-engine/androidTest`, outside the default
+instrumentation build. `ObservationCoverage` collection, `CaptureObservationBinding`
+and `FeedbackMotion` still have production callers. `ModelScreenSummary` remains
+a public SDK API, without a current Split caller. These retained types do not
+reactivate the old engine. The old MiMo/Artemis experiments and `continuous_agent` /
+`feedback_operator` switches are not current runtime setup instructions.
+
+Current Skills are bundled or explicitly imported packages. The app has no
+application-learning entry and current tasks do not accumulate or read the former
+learned/manual libraries. Legacy files and explicit SDK inspection/export remain
+available for compatibility; see [Skills](docs/developer/direct-skills.md) and
+[Legacy Learning Data](docs/developer/app-learning.md). The Android host also
+retains its shared themes, task overlays, Chinese speech fallback and device/window
+capability reporting. See the [Android interface guide](docs/developer/android.md).
+
+## Optional standalone gateway
+
+The following commands start the optional standalone gateway on port 8765.
+Phone direct mode does not require this service.
 
 ```sh
 python -m pip install -e './framework[test]'
@@ -28,19 +55,69 @@ generated developer-token.txt is a private bearer credential, configured in the
 Android developer app. Actual model tasks require your own private key file
 through --api-key-file. Offline tests do not call paid model services.
 
+The separate standalone gateway default main model is Xiaomi `mimo-v2.5-pro` (text), with `mimo-v2.5` for
+on-demand screenshot understanding. Pass `--provider deepseek` and its separate
+key file to use the legacy provider. The official DeepSeek Harness remains the
+execution library; the upstream model is selected by the host proxy. Thinking
+is explicitly disabled, outputs remain bounded, and task completion still
+requires validated evidence even when MiMo chooses ordinary text over a tool.
+Provider configuration is documented in [Standalone Setup](docs/developer/standalone.md).
+
 Build Android with JDK 17+, Android SDK 35 and the included Gradle wrapper:
 
 ```sh
+python scripts/prepare-embedded-tts.py --download
+python scripts/prepare-embedded-asr.py --download
 cd android
 ./gradlew :sdk:testDebugUnitTest :developer-app:assembleDebug :test-app:assembleDebug
 ```
 
+The preparation commands download pinned TTS and ASR archives and verify their
+SHA-256 values. Subsequent Gradle builds prepare both embedded Chinese speech
+asset sets from those local archives without downloading them again. The source
+export excludes model weights; built SDK/client artifacts include the TTS fallback
+and offline ASR assets. See [Embedded Chinese Speech](docs/developer/embedded-chinese-tts.md)
+and the [ASR license and model details](docs/licenses/embedded-chinese-asr.txt) for
+licenses and asset requirements.
+
 Use gradlew.bat on Windows. Configure the Android SDK path locally. Device
 accessibility, screenshot capture, microphone and document permissions remain
-explicit Android grants. Payment is always manual; avoid testing real social
+explicit Android grants. Delegated payment is off by default. A user can enable
+it in Android Settings after three timed risk acknowledgements; ask/assist still
+require approval, while full access may attempt an ordinary payment within the
+task. Each task/application pair permits at most one payment attempt. Passwords,
+financial OTPs, transfers and persistent debit settings remain manual, and an
+accepted click does not establish payment success. See
+[Delegated Payment](docs/developer/payment-delegation.md) for the host contract,
+revocation and multi-step checkout limitations. Avoid testing real social
 messages. Simulated test-app results do not establish real-app compatibility.
 
-## Observed verification
+## Historical verification
+
+These records predate the alpha.60 cleanup. They document their original scope;
+they do not establish that the current build, migrated tests or device flows pass.
+
+Alpha.18-self-core SDK JVM tests passed 415 cases, including five rollback
+migration checks. The developer APK and SDK AAR built successfully. The APK uses
+versionCode18 and the same signing certificate as the original alpha16 package.
+Its three self-core source files are unchanged by the rollback; the Artemis
+Android classes are absent from its DEX. No phone was connected for installation,
+so device deployment and migration have not been verified on a phone. No new
+business tasks were run. WPS, complete cross-task factual recall and actual game
+combat remain unaccepted. Hosted CI has not run for this unpublished update.
+
+Alpha.4's historical Python integration suite passed 338 tests with one Windows
+symlink-permission skip. It includes both provider transports, MiMo nullable tool
+responses, main/vision model separation, and official Harness/MCP round trips.
+The independent public source snapshot also passed 316 Python tests with the
+same one permission skip. The SDK JVM suite passed 37 tests. Device results belong to the accompanying
+release notes; the earlier alpha.3/alpha.2 counts below are historical.
+
+A bounded MiMo Pro synthetic tool call returned valid arguments (600 tokens,
+2.806s). A V2.5 geometric-image probe returned metered text but included an
+irrelevant refusal; it failed semantic quality review despite matching shape
+keywords. This is not evidence of successful MiMo WPS, messaging or gameplay.
+No current business-task success or real-time performance guarantee is claimed.
 
 For alpha.3, 30 SDK JVM tests and six LDPlayer device cases passed, covering
 draft navigation/recreation, delayed creation and duplicate prevention, background
@@ -90,10 +167,19 @@ The packaged Android builds use debug signing. Local gateway verification does
 not establish Docker deployment; the container migration recipe has not been
 build-tested in this environment.
 
-The independent public installation passed its full local Python suite: 258 tests
+The earlier independent public installation passed its local Python suite: 258 tests
 passed and one Windows symlink-permission test skipped. The final vision-context
 alignment subsequently passed 41 focused tests. Public Android builds
-passed with 16 SDK JVM tests. These local fixtures do not call paid model services.
+passed with 16 SDK JVM tests at that earlier snapshot. These local fixtures do not call paid model services.
+
+The 2026-09-09 alpha20 development candidate separately passed 824 SDK JVM tests.
+Its continuous transaction and stage-plan experiment was disabled by
+default: actual Arknights navigation and WPS editing cases both reached the
+predeclared 150-second limit without completing. Unit tests establish host and
+protocol behavior, not end-to-end application reliability or real-time game
+control. See [Continuous Conversations](docs/developer/continuous-conversations.md)
+for that historical experiment's data contract and limits. Its switch does not
+select an engine in the current Android runtime.
 
 - [Standalone Setup](docs/developer/standalone.md)
 - [Architecture](docs/architecture/public-system.md)
@@ -103,6 +189,10 @@ passed with 16 SDK JVM tests. These local fixtures do not call paid model servic
 - [Documents](docs/developer/documents.md)
 - [Data Retention](docs/developer/data-retention.md)
 - [Interaction and Login Assistance](docs/developer/interaction-login.md)
+- [Phone Direct Mode](docs/developer/phone-direct.md)
+- [Device Compatibility](docs/developer/device-compatibility.md)
+- [Cloud Speech](docs/developer/cloud-speech.md)
+- [Embedded Chinese Speech](docs/developer/embedded-chinese-tts.md)
 - [Export and Release](docs/developer/open-source.md)
 
 The links above are documentation topics under docs/developer in this repository.

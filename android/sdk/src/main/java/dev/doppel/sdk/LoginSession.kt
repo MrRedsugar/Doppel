@@ -15,10 +15,18 @@ class LoginSession(private val clock: () -> Long = System::currentTimeMillis) {
         clear()
         app = packageName; run = runId; signature = marker
         started = clock(); expires = started + 300_000
-        privateValues[phone] = started + 600_000
+        privateValues[phone] = maxOf(privateValues[phone] ?: 0, started + 600_000)
     }
 
     @Synchronized fun active(): Boolean = app.isNotEmpty() && clock() < expires
+
+    internal data class Readiness(val state: String, val expiresInMs: Long) {
+        val active get() = state != "inactive"
+        val codeReady get() = state == "ready"
+    }
+    @Synchronized internal fun readiness(packageName: String, runId: String): Readiness =
+        if (runId.isBlank() || packageName != app || runId != run || !active()) Readiness("inactive", 0)
+        else Readiness(if (consumed) "consumed" else if (code == null) "waiting" else "ready", (expires - clock()).coerceAtLeast(0))
 
     @Synchronized fun receive(source: String, smsPackage: String, foreground: String, message: String, postedAt: Long): Boolean {
         if (!active() || consumed || source != smsPackage || smsPackage.isBlank() || foreground != app || postedAt < started || postedAt > clock() + 5000) return false
@@ -29,7 +37,7 @@ class LoginSession(private val clock: () -> Long = System::currentTimeMillis) {
         val candidates = Regex("(?<![0-9])[0-9]{4,8}(?![0-9])").findAll(message).map { it.value }.toSet()
         if (candidates.size != 1) return false
         code = candidates.single()
-        privateValues[code!!] = clock() + 600_000
+        privateValues[code!!] = maxOf(privateValues[code!!] ?: 0, clock() + 600_000)
         return true
     }
 
@@ -37,6 +45,7 @@ class LoginSession(private val clock: () -> Long = System::currentTimeMillis) {
         if (!active() || consumed || packageName != app || runId != run) return null
         val value = code ?: return null
         consumed = true; code = null
+        protectPassword(value)
         return value
     }
 
@@ -48,6 +57,14 @@ class LoginSession(private val clock: () -> Long = System::currentTimeMillis) {
         return output
     }
 
+    /** A filled password may remain visible after the OTP timeout or a task ends. Never expire its mask. */
+    @Synchronized internal fun protectPassword(value: String) {
+        if (value.isNotEmpty()) privateValues[value] = Long.MAX_VALUE
+    }
+
+    @Synchronized internal fun containsPrivateValue(value: String): Boolean =
+        value.isNotEmpty() && privateValues.any { (secret, until) -> secret.isNotEmpty() && until >= clock() && value.contains(secret) }
+
     @Synchronized fun clear() {
         app = ""; run = ""; signature = ""; started = 0; expires = 0; code = null; consumed = false
     }
@@ -55,6 +72,6 @@ class LoginSession(private val clock: () -> Long = System::currentTimeMillis) {
     @Synchronized fun expire(): Boolean {
         if (!active()) clear()
         privateValues.entries.removeAll { it.value <= clock() }
-        return app.isNotEmpty() || privateValues.isNotEmpty()
+        return app.isNotEmpty() || privateValues.any { it.value != Long.MAX_VALUE }
     }
 }

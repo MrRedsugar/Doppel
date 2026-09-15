@@ -42,15 +42,18 @@ def _contained_label(node, observation):
 
 
 def compact_observation(observation: Observation, *, limit: int = 14000) -> str:
-    lines = [f"App {observation.package_name}; screen {observation.screen_id}; {observation.width}x{observation.height}"]
+    payment_state = "enabled" if observation.payment_consent_id else "disabled"
+    lines = [f"App {observation.package_name}; screen {observation.screen_id}; {observation.width}x{observation.height}; delegated_payment={payment_state}"]
     length = len(lines[0])
     for node in observation.nodes:
         if node.password:
             continue
         label = " ".join((node.text or node.description).split())[:300]
+        state = " ".join((node.state_description or "").split())[:300]
         if not label and (node.clickable or node.long_clickable):
             label = _contained_label(node, observation)
-        if not label and not (node.clickable or node.long_clickable or node.editable or node.scrollable):
+        if not label and not (node.clickable or node.long_clickable or node.editable or node.scrollable or
+                              node.checkable or node.selected or state):
             continue
         properties = [node.role.rsplit(".", 1)[-1]]
         if node.clickable and node.enabled:
@@ -65,6 +68,12 @@ def compact_observation(observation: Observation, *, limit: int = 14000) -> str:
             properties.append("scroll")
         if not node.enabled:
             properties.append("disabled")
+        if node.checkable:
+            properties.append("checked=" + ("unknown" if node.checked is None else str(node.checked).lower()))
+        if node.selected:
+            properties.append("selected=true")
+        if state:
+            properties.append("state=" + state)
         if not label:
             x1, y1, x2, y2 = node.bounds
             label = f"unlabeled at {(x1+x2)//2},{(y1+y2)//2}"

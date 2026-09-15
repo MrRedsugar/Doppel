@@ -57,7 +57,7 @@ def test_finish_does_not_charge_another_model_call(tmp_path):
     runtime, device, run, client = setup(tmp_path)
     evidence = observe(runtime, device, run, client)["evidence_id"]
     call(client, run, "finish_task", outcome="completed", summary="Verified fixture", evidence_ids=[evidence])
-    response = client.post(f"/v1/internal/runs/{run.id}/chat/completions", json={"model": "deepseek-v4-pro", "messages": [], "stream": True})
+    response = client.post(f"/v1/internal/runs/{run.id}/chat/completions", json={"model": runtime.config.model, "messages": [], "stream": True})
     assert response.status_code == 200
     assert "Verified fixture" in response.text and "[DONE]" in response.text
     assert not any(event.kind == "model_start" for event in runtime.events("alice", run.id))

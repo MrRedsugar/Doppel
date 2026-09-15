@@ -49,17 +49,48 @@ points UI belongs to the excluded private app.
 ## Model Configuration
 
 ```sh
-doppel serve --data-dir .local/developer --api-key-file /private/deepseek-key.txt
+doppel serve --data-dir .local/developer --provider xiaomi-mimo --api-key-file /private/mimo-key.txt
 ```
 
-The configured key is read by the gateway, not placed in Android clients. The
-default main model is DeepSeek V4 Pro. The shipped Harness worker sets
-`reasoning_effort="off"` for task runs; the public CLI and `RuntimeConfig` do not
-expose a switch to enable reasoning. The official Harness SDK may require its
-packaged/downloaded runtime and network on first use. Budget limits and usage
-events are public framework behavior; this developer gateway has no commercial
-credit ledger and uses the operator's provider account. Missing credentials cause
-model tasks to fail explicitly. Health/protocol/offline tests do not need a key.
+The default provider is `xiaomi-mimo`, with `mimo-v2.5-pro` for primary text
+decisions and `mimo-v2.5` for auxiliary screenshot understanding. The gateway
+calls `https://api.xiaomimimo.com/v1/chat/completions`; the configured key is read
+only by the gateway, not placed in Android clients or Harness workers. Use a
+pay-as-you-go MiMo API key; Token Plan keys require a different upstream route
+and are not supported by this profile.
+
+`--model` and `--vision-model` override the defaults for the selected provider.
+The audited MiMo profile accepts `mimo-v2.5-pro` or `mimo-v2.5` as primary,
+and only `mimo-v2.5` as vision. The DeepSeek profile accepts `deepseek-v4-pro`
+or `deepseek-v4-flash` as primary, with `deepseek-v4-flash-vision-exp` as vision.
+Mismatched provider/model combinations fail configuration validation. An explicit
+DeepSeek configuration retains its original model defaults:
+
+```sh
+doppel serve --data-dir .local/developer --provider deepseek --api-key-file /private/deepseek-key.txt
+```
+
+DeepSeek defaults to `deepseek-v4-pro` and `deepseek-v4-flash-vision-exp`. Supply
+the matching provider's key. Provider selection is explicit; an upstream failure
+does not switch providers. `RuntimeConfig` exposes `provider`, `model` and
+`vision_model` for embedded deployments.
+
+Thinking is disabled in the shipped worker/proxy, with a maximum 1600 output
+tokens per call. No reasoning-enable switch is exposed because the Harness's
+complete reasoning-history replay has not been verified. MiMo supports only
+automatic tool selection; server-side `finish_task` and evidence checks still
+determine completion. DeepSeek retains required tool selection. A model's plain
+text claim of success is not completion evidence.
+
+The official Harness SDK may require its packaged/downloaded runtime and network
+on first use. Budget limits and usage events are public framework behavior;
+events identify the provider/model and include available cache/reasoning token
+details. Detail counters are subsets of aggregate usage, not extra charges.
+This developer gateway has no commercial credit ledger and uses the operator's
+provider account. Missing credentials cause model tasks to fail explicitly.
+Health/protocol/offline tests do not need a key. See the official
+[MiMo API reference](https://mimo.mi.com/static/docs/api/chat/openai-api.md) and
+[price list](https://mimo.mi.com/static/docs/price/pay-as-you-go.md).
 
 ## Tests and Data
 

@@ -24,6 +24,7 @@ Installed metadata inspected on 2026-09-07:
 | referencing | 0.37.0 | MIT | https://github.com/python-jsonschema/referencing |
 | python-multipart | 0.0.32 | Apache-2.0 | https://github.com/Kludex/python-multipart |
 | deepseek-harness-sdk | 0.1.2rc1 | MIT | https://github.com/deepseek-ai/deepseek-harness |
+| tzdata | 2026.3 | Apache-2.0 package; IANA data retains upstream terms | https://github.com/python/tzdata |
 
 The official DeepSeek Harness integration was inspected at upstream revision
 d347e703908d0406b7a7ef80e3a0e594d86b2215. The SDK may fetch/cache its executable
@@ -37,8 +38,13 @@ transitive dependency. Provider service terms and model pricing remain separate.
 | Dependency | Version | License/scope |
 | --- | --- | --- |
 | AndroidX Core/Core-KTX | 1.15.0 | Apache-2.0; Android SDK dependency |
+| SnakeYAML | 2.4 | Apache-2.0; SafeConstructor for bounded Skills metadata |
+| OkHttp | 4.12.0 | Apache-2.0; its bundled Public Suffix List data is MPL-2.0 |
+| jsoup | 1.18.3 | MIT; bounded HTML-to-readable-text processing |
 | Vosk Android | 0.3.75 | Apache-2.0; local speech recognition runtime |
 | JNA Android AAR | 5.18.1 | Apache-2.0 OR LGPL-2.1-or-later; Doppel uses the Apache-2.0 option |
+| ONNX Runtime Android | 1.22.0 | MIT; embedded Chinese speech inference |
+| Kokoro-82M-v1.1-zh | int8 multi-language v1.1 archive | Apache-2.0; packaged Chinese completion-speech model and voice |
 | Kotlin plugin/stdlib | 2.1.20 | Apache-2.0 |
 | Android Gradle Plugin | 8.9.2 | Apache-2.0; separate Android SDK components have their own terms |
 | Gradle wrapper | 8.11.1 | Apache-2.0; wrapper scripts preserve upstream copyright/license headers |
@@ -63,7 +69,21 @@ The optional local Chinese speech model is vosk-model-small-cn-0.22, listed as
 Apache-2.0 at https://alphacephei.com/vosk/models on 2026-09-07. Its separately
 downloaded archive is 43,898,754 bytes, SHA-256
 `3af8b0e7e0f835ae9d414ce5df580237a3cfb08d586c9fbbb0f7ff29ad5b14ba`.
-Model weights are not bundled in this source export or the APK.
+Vosk recognition weights are not bundled in this source export or the APK.
+
+Completion speech includes the unchanged Kokoro Chinese int8 model, the zf_001
+voice subset and a transformed Chinese pronunciation lexicon. The original
+lexicon generator uses misaki (Apache-2.0) and pypinyin (MIT). Build preparation
+verifies the official source archive SHA-256 before selecting those assets;
+no sherpa-onnx runtime, espeak-ng runtime/data, other-language lexicons, Jieba
+data or normalization FSTs are packaged. Full sources, change notices and MIT
+license text are in `docs/licenses/embedded-chinese-tts.txt`; preparation copies
+that notice and the complete Apache-2.0 license into the model's APK asset
+directory. See `docs/developer/embedded-chinese-tts.md` for the pinned archive,
+selection procedure and runtime limitations. Source exports exclude weights;
+SDK/client binaries include approximately 116.5 MB of selected speech assets
+before package compression. ONNX Runtime retains its MIT license and upstream
+third-party notices independently of the model license.
 
 Vosk's AAR has no bundled license text; JNA's classes.jar includes its dual-license
 statement but not the full Apache license. Doppel therefore packages full license
@@ -82,6 +102,15 @@ applications' brands/assets is implied. No platform-wide payment safety or
 application compatibility claim follows from these license notices.
 
 ## Release Audit
+
+The 2026-09-08 Android additions were checked against their resolved Maven POMs
+and jars. SDK assets reproduce jsoup's exact MIT license and OkHttp's Public
+Suffix List notice, along with full Apache-2.0 and MPL-2.0 texts. SnakeYAML's jar
+does not contain a separate NOTICE. See `android/sdk/src/main/assets/third_party/`.
+The original bundled Arknights skill contains independently written factual
+summaries and versioned source links; no game assets, full community dataset or
+third-party walkthrough text are included. Game and source-site rights remain
+with their respective owners.
 
 These are the inspected direct dependencies, not a complete resolved SBOM.
 Before distributing binaries, capture the exact installed Python dependency tree,

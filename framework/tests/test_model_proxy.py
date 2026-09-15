@@ -28,7 +28,7 @@ def setup_proxy(tmp_path):
     key = tmp_path / "key.txt"
     key.write_text("sk-fixture-not-a-real-provider-key")
     billing = BillingRecorder()
-    runtime = DoppelRuntime(RuntimeConfig(data_dir=tmp_path / "data", api_key_file=key, auto_start=False), billing)
+    runtime = DoppelRuntime(RuntimeConfig(data_dir=tmp_path / "data", api_key_file=key, auto_start=False, provider="deepseek"), billing)
     device = runtime.register_device("alice", "a", "A")
     run = runtime.create_run("alice", device.id, "Inspect", "full")
     app = FastAPI()

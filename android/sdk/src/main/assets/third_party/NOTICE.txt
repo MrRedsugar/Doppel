@@ -40,3 +40,20 @@ Verified archive SHA-256:
 The archive is downloaded separately and is not bundled in Doppel source or APKs.
 See Apache-2.0.txt for its license. Provider-hosted model updates require a new
 integrity and license check.
+
+SnakeYAML 2.4 (org.yaml:snakeyaml)
+Apache License 2.0; see Apache-2.0.txt.
+https://bitbucket.org/snakeyaml/snakeyaml/src/snakeyaml-2.4/
+Used only through SafeConstructor for bounded, data-only Skills metadata.
+
+OkHttp 4.12.0 (com.squareup.okhttp3:okhttp)
+Apache License 2.0; see Apache-2.0.txt.
+https://github.com/square/okhttp/tree/parent-4.12.0
+Its packaged publicsuffixes.gz is compiled from The Public Suffix List:
+https://publicsuffix.org/list/public_suffix_list.dat
+That list is subject to the Mozilla Public License 2.0; see MPL-2.0.txt.
+This notice is reproduced from okhttp3/internal/publicsuffix/NOTICE in the jar.
+
+jsoup 1.18.3 (org.jsoup:jsoup)
+Copyright (c) 2009-2024 Jonathan Hedley <https://jsoup.org/>.
+MIT; full upstream jar license is reproduced in jsoup-LICENSE.txt.

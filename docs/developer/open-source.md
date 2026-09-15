@@ -11,7 +11,7 @@ pyproject, Android SDK/developer app/isolated test app sources, Gradle wrapper,
 selected public developer docs, Apache license and third-party notices. Generated
 Android settings explicitly include only those three public modules.
 
-Excluded: product/, Android commercial app, private service docs, internal
+Excluded: product/, docs/product/, Android commercial app, private service docs, internal
 requirements/research/worklogs, local data, keys, credentials, screenshots,
 databases, Gradle/Python caches, build outputs, toolchain downloads and binary
 dependencies. No original repository history is copied. The mixed root LICENSE

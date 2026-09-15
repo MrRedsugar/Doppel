@@ -7,6 +7,8 @@ import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 
 class LoginNotificationService : NotificationListenerService() {
+    companion object { @Volatile internal var connected: LoginNotificationService? = null; private set }
+    override fun onListenerConnected() { super.onListenerConnected(); connected = this }
     override fun onNotificationPosted(notification: StatusBarNotification) {
         if (!LoginAssist.sensitiveSessionActive()) return
         val foreground = DoppelAccessibilityService.instance?.foregroundPackage().orEmpty()
@@ -20,5 +22,6 @@ class LoginNotificationService : NotificationListenerService() {
         val body = (extras.getCharSequence(Notification.EXTRA_BIG_TEXT) ?: extras.getCharSequence(Notification.EXTRA_TEXT))?.toString().orEmpty()
         LoginAssist.session.receive(notification.packageName, trusted, foreground, "$title $body", notification.postTime)
     }
-    override fun onListenerDisconnected() { LoginAssist.clearSession(); super.onListenerDisconnected() }
+    override fun onListenerDisconnected() { if (connected === this) connected = null; LoginAssist.clearSession(); super.onListenerDisconnected() }
+    override fun onDestroy() { if (connected === this) connected = null; super.onDestroy() }
 }

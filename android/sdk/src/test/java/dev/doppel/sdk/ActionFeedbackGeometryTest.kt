@@ -15,7 +15,7 @@ class ActionFeedbackGeometryTest {
         }
         assertNull(ActionFeedbackGeometry.create("tap", listOf(0, 0, 30, 40), 0, 200))
     }
-    @Test fun scrollPathStaysInsideNodeAndPointsInRequestedDirection() {
+    @Test fun scrollPathStaysInsideNodeAndShowsFingerOppositeViewportProgression() {
         val bounds = listOf(40, 60, 140, 260)
         for (direction in listOf("up", "down", "left", "right")) {
             val geometry = ActionFeedbackGeometry.create("scroll", bounds, 300, 400, direction)!!
@@ -25,10 +25,10 @@ class ActionFeedbackGeometryTest {
                 assertTrue(point.y > 60 && point.y < 260)
             }
             when (direction) {
-                "up" -> assertTrue(end.y < start.y)
-                "down" -> assertTrue(end.y > start.y)
-                "left" -> assertTrue(end.x < start.x)
-                "right" -> assertTrue(end.x > start.x)
+                "up" -> assertTrue(end.y > start.y)
+                "down" -> assertTrue(end.y < start.y)
+                "left" -> assertTrue(end.x > start.x)
+                "right" -> assertTrue(end.x < start.x)
             }
         }
         assertNull(ActionFeedbackGeometry.create("scroll", bounds, 300, 400, "diagonal"))

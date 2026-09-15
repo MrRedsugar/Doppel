@@ -42,6 +42,27 @@ def test_configuration_authentication_owner_scope_and_updates(tmp_path):
         assert client.get('/v1/extensions', headers=alice).json() == {'items': []}
 
 
+def test_multiple_services_keep_independent_grants_and_reject_stale_edit(tmp_path):
+    runtime = DoppelRuntime(RuntimeConfig(data_dir=tmp_path, auto_start=False))
+    app = FastAPI()
+    app.include_router(create_extension_router(runtime, lambda: 'alice'))
+    with TestClient(app) as client:
+        first = {'name': 'notes', 'url': 'http://127.0.0.1:9876/mcp', 'allowed_tools': ['read'], 'read_only_tools': ['read']}
+        created = client.post('/extensions', json=first).json()
+        assert client.post('/extensions', json={**first, 'name': 'calendar', 'allowed_tools': [], 'read_only_tools': []}).status_code == 201
+        updated = client.put('/extensions/notes', json={**first, 'expected_revision': created['revision']})
+        assert updated.status_code == 200, updated.text
+        stale = client.put('/extensions/notes', json={**first, 'expected_revision': created['revision']})
+        assert stale.status_code == 409
+        moved = client.put('/extensions/notes', json={**first, 'url': 'http://127.0.0.1:9999/mcp'})
+        assert moved.status_code == 422
+        clean = {**first, 'url': 'http://127.0.0.1:9999/mcp', 'allowed_tools': [], 'read_only_tools': []}
+        assert client.put('/extensions/notes', json=clean).status_code == 200
+        assert client.delete('/extensions/notes').status_code == 200
+        remaining = client.get('/extensions').json()['items']
+        assert len(remaining) == 1 and remaining[0]['name'] == 'calendar' and remaining[0]['allowed_tools'] == []
+
+
 @pytest.mark.asyncio
 async def test_discovery_and_execution_with_real_http_provider(tmp_path):
     provider = MCPServer('Integration fixture')

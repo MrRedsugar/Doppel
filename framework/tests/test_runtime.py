@@ -36,6 +36,27 @@ def test_one_device_cannot_execute_two_active_runs(runtime):
     assert runtime.create_run("alice", device.id, "Next task", "full").id != run.id
 
 
+def test_automatic_run_is_a_task_without_conversation_history(runtime):
+    device = runtime.register_device("alice", "phone-auto", "Automatic phone")
+    run = runtime.create_run("alice", device.id, "Skip the advert", "assist",
+                             conversation_enabled=False, source="trigger")
+    assert run.conversation_enabled is False
+    assert run.conversation_id is None
+    assert run.source == "trigger"
+    assert run.conversation_messages == []
+    assert runtime.conversation("alice", run.id) == []
+    runtime.set_status(run.id, "running", "正在执行自动任务")
+    updated = runtime.get_run("alice", run.id)
+    assert updated.conversation_messages == []
+
+
+def test_automatic_run_rejects_conversation_parent(runtime):
+    device = runtime.register_device("alice", "phone-auto-parent", "Automatic phone")
+    with pytest.raises(ValueError, match="Background task"):
+        runtime.create_run("alice", device.id, "Background work", "assist", parent_run_id="old",
+                           conversation_enabled=False, source="schedule")
+
+
 def test_command_redelivery_keeps_id_and_duplicate_result_is_idempotent(runtime):
     device, run = make_run(runtime)
     command = runtime.queue_command(run.id, "observe")
@@ -60,6 +81,18 @@ def test_cancel_prevents_unexecuted_command_and_persists_across_restart(runtime)
     assert restarted.get_run("alice", run.id).status == "cancelled"
     assert restarted.next_command("alice", device.id) is None
     assert restarted.command_result(command.id).status == "cancelled"
+
+
+def test_repeated_pause_preserves_failure_reason_and_pending_takeover(runtime):
+    device, run = make_run(runtime)
+    reason = "需要手动完成安全验证"
+    pending = {"id": "verification-request", "kind": "input", "reason": "verification", "message": reason, "manual_only": True}
+    runtime.set_status(run.id, "paused", reason, pending)
+    before = runtime.get_run("alice", run.id).model_dump()
+    runtime.pause_run("alice", run.id)
+    runtime.pause_run("alice", run.id)
+    assert runtime.get_run("alice", run.id).model_dump() == before
+    assert runtime.next_command("alice", device.id) is None
 
 
 def test_paused_run_has_no_dispatch_until_resumed(runtime):
@@ -275,9 +308,10 @@ def test_payment_cannot_be_dispatched_even_after_answer(runtime, mode):
     observation = Observation(screen_id="pay", package_name="test.app", width=100, height=200, nodes=[Node(id="pay", text="Pay $28.00", bounds=[0, 0, 100, 100], clickable=True)])
     runtime.submit_result("alice", device.id, CommandResult(command_id=observed.id, run_id=run.id, status="ok", observation=observation))
     command = runtime.queue_command(run.id, "tap", screen_id="pay", target="pay")
-    assert runtime.get_run("alice", run.id).status == "awaiting_input"
-    with pytest.raises(ValueError):
+    assert runtime.get_run("alice", run.id).status == "paused"
+    with pytest.raises(Conflict):
         runtime.answer("alice", run.id, command.id, approve=True)
-    runtime.answer("alice", run.id, command.id, text="Handled manually")
+    runtime.resume_run("alice", run.id)
+    assert runtime.get_run("alice", run.id).requires_fresh_observation is True
     assert runtime.command_result(command.id).status == "blocked"
     assert runtime.next_command("alice", device.id) is None

@@ -13,9 +13,13 @@ another owner's data. Health is GET /health with no token and contains no secret
 | POST /devices | {installation_id,name} | {id,name,last_seen} |
 | GET /devices | None | {items:[Device]} |
 | GET /points | None | Developer gateway only: unlimited=true, retained input/output tokens and estimated used_points |
-| POST /runs | {device_id,goal,mode,allowed_packages?} | Run; HTTP 201 |
+| GET /usage | None | Token-first usage dashboard: aggregate input/output tokens, request and screenshot counts, plus up to 30 daily `{date,input_tokens,output_tokens,requests,screenshots}` rows; no points field |
+| POST /runs | {device_id,goal,mode,allowed_packages?,parent_run_id?} | Run; HTTP 201 |
 | GET /runs | None | {items:[Run]} |
-| GET /runs/{id} | None | Run |
+| GET /runs/{id} | None | Run; includes a stable local `title` and `conversation_id` |
+| POST /conversation/intent | {message,history?,device_available?} | Structured `{intent,confidence,task_goal,title,question,reply?}`; never creates a task |
+| GET /runs/{id}/conversation | None | `{items:[{id,conversation_id,title,goal,message,status,created_at,messages:[{id,role,text,kind,created_at}]}]}` in chronological order |
+| POST /runs/{id}/review | {question} (1–2000 chars) | Read-only model analysis of the recorded run |
 | POST /runs/{id}/pause | None | Run |
 | POST /runs/{id}/resume | None | Run |
 | POST /runs/{id}/cancel | None | Run |
@@ -29,6 +33,19 @@ mode is ask, assist or full. allowed_packages is an optional array of up to fort
 Android package names; an empty array leaves package selection to the authorized
 task. The broker always preserves permission/payment checks. A device cannot have
 two active tasks. Querying/operating a foreign owned resource returns 403/404.
+
+Optional `parent_run_id` continues a conversation from a terminal run owned by
+the same user on the same device. The new execution has its own mode, permissions,
+commands and fresh observation. The conversation reader resolves retained source
+records with a 12-entry/24000-character bound; deleting an ancestor truncates its
+earlier history. Omit the parent for a new conversation. See
+[continuous conversations](../developer/continuous-conversations.md).
+
+`POST /runs/{id}/review` is a diagnostic conversation for the history screen. It
+uses only bounded task metadata and event evidence, never screenshots, credentials,
+commands or pending approvals. It cannot resume, pause, or mutate the run and is
+available for paused or terminal runs. The response may be an OpenAI-shaped
+completion (`choices[0].message.content`) so clients can render provider text.
 
 ```json
 {
@@ -45,11 +62,18 @@ specific command or extension invocation when applicable. Clients display exact
 pending scope and submit its current request_id; they cannot substitute arguments.
 An expired request or changed target/configuration returns 409.
 
-Verification/login takeover uses status=paused and a pending request with
-manual_only=true and reason=verification|login. Display the message and use
+Pausing an already paused task is idempotent: retain its specific `message` and
+`pending_request` rather than replacing the cause with a generic pause message.
+Clients must surface a non-user pause explanation and preserve it when opening
+task controls. A missing cause must be shown as unknown, not interpreted as task
+completion or proof of a particular permission or capability boundary.
+
+Verification/login/payment takeover uses status=paused and a pending request with
+manual_only=true and reason=verification|login|payment. Display the message and use
 POST /runs/{id}/resume after the user has acted; do not submit an ordinary answer.
 requires_fresh_observation gates resumed model work until a current screen is
-received. The interrupted mutation is not automatically replayed.
+received. For payment takeover, the user must check the order and charge outcome
+before continuing. The interrupted mutation is not automatically replayed.
 
 Events contain sequence, kind, message, data and created_at; use sequence as the
 after cursor. Result status and subsequent observation determine actual progress,
@@ -82,7 +106,8 @@ are independently checked on host/device.
 ```
 
 Result.status is ok/stale/blocked/error/cancelled. Observation includes screen_id,
-package_name, width, height, nodes and captured_at. Each node has id, text,
+package_name, width, height, nodes and captured_at, plus optional
+payment_consent_id as described below. Each node has id, text,
 description, role, bounds=[left,top,right,bottom], clickable, long_clickable, editable, enabled,
 scrollable, password and resource_id. The device redacts password contents and
 caps its tree/text size; clients must preserve node IDs instead of reconstructing
@@ -94,6 +119,47 @@ before dispatch. Identical result reposts are idempotent; changing an already
 committed result returns 409. After local raw-data purge preserve the ID/hash or
 uncertain tombstone and do not execute again. A lost/timeout result is uncertain,
 not authorization for a blind retry.
+
+## Delegated Payment Contract
+
+`Observation.payment_consent_id` is an optional, device-owned string in the format
+`payment-v1:<lowercase UUID>`; omitted or null means disabled. Unsupported versions,
+malformed IDs and non-string values are rejected. The Android setting defaults to
+off and requires three timed, local risk acknowledgements before enabling.
+There is no model, MCP or user HTTP endpoint that creates local consent.
+
+Only the runtime may copy the current device observation's consent ID onto a
+recognized ordinary payment `tap` command. `Command.payment_consent_id` is invalid
+for other command kinds. An `act` caller cannot supply the field, including null.
+Compact model observations report `delegated_payment=enabled|disabled` without
+exposing the identifier; a read-only observation never enables the setting.
+
+Without consent every mode hands payment to the user. With consent, ask/assist
+hold the payment action for approval, and full may queue it within the user's task.
+The gateway rechecks consent and screen at approval and dispatch; Android rechecks
+the persisted local generation and exact current screen immediately before action.
+Payment does not use relaxed target revalidation. Revocation or a new consent
+generation invalidates old commands, even if the device is offline. Payment
+credentials, financial OTPs, transfers and persistent debit settings remain manual.
+
+Android claims a durable task/application attempt before clicking. A changed
+command ID, button label, amount, resource ID or consent generation cannot justify
+another payment attempt in that application during the same task. This may require
+manual continuation for multi-step checkout. A new task does not deduplicate a
+previous merchant transaction; inspect prior orders before trying again.
+
+Payment result `data.payment_attempted=true` records an attempt claim, and
+`payment_action_accepted` records whether Android accepted the click request.
+Neither proves a charge or merchant acceptance, even when `status=ok`. Inspect
+the subsequent screen/order state. A blocked payment can return
+`data.human_takeover="payment"`; duplicate or storage failures may also include
+`payment_guard`. Display the result and use the takeover/resume flow above.
+Do not turn a blocked, stale, failed or uncertain attempt into an automatic retry.
+
+Update Android and gateway together: old clients omit consent and remain manual,
+while older gateways may reject the additional observation field. See
+[Delegated Payment](../developer/payment-delegation.md) for the matching local
+database/grant-file requirement, revocation failures and UI recognition limits.
 
 ## Documents, Extensions and Cleanup
 
@@ -123,8 +189,10 @@ resource; 409 current-state/ownership/overwrite conflict; 413 body too large;
 502/504 external transport failure/timeout. Error bodies use detail. Clients must
 not expose provider credentials, base64 images or exception traces in ordinary logs.
 
-Python entry points: RuntimeConfig(data_dir, api_key_file=None, model="deepseek-v4-pro",
-host_url="http://127.0.0.1:8765") and DoppelRuntime(config) own execution state.
+Python entry points: RuntimeConfig(data_dir, api_key_file=None, model=None,
+provider="xiaomi-mimo", vision_model=None, host_url="http://127.0.0.1:8765") and
+DoppelRuntime(config) own execution state. Omitted models resolve to the provider's
+defaults: mimo-v2.5-pro for main decisions and mimo-v2.5 for auxiliary vision.
 create_router(runtime, owner_dependency) returns the full /v1 APIRouter. The CLI
 creates a standalone FastAPI application. Internal /v1/internal/runs/{id}/tool and
 /chat/completions routes are reserved for the trusted Harness adapter's task bearer

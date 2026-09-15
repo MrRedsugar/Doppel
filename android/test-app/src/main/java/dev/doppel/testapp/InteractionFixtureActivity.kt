@@ -28,6 +28,9 @@ class InteractionFixtureActivity : Activity() {
         button("模拟登录") { login() }
         button("验证接管场景") { challenge() }
         button("手势反馈") { gestures() }
+        button("控件触发验证") { controlTriggers() }
+        button("CAPTCHA") { challenge() }
+        button("控件扫描验证") { controlScan() }
     }
     private fun login() {
         screen("DoppelTest 登录")
@@ -63,6 +66,39 @@ class InteractionFixtureActivity : Activity() {
         button("点击目标") { feedback.text = "点击成功" }
         button("长按目标") { feedback.text = "普通点击" }.setOnLongClickListener { feedback.text = "长按成功"; true }
         for (index in 1..30) label("滚动条目 $index")
+        button("返回验收") { home() }
+    }
+
+    private fun controlTriggers() {
+        screen("控件触发验证")
+        val feedback = label("触发次数 0")
+        var count = 0
+        val trigger = button("触发目标") { feedback.text = "触发次数 ${++count}" }.apply { id = android.R.id.button1 }
+        button("切换目标显示") { trigger.visibility = if (trigger.visibility == android.view.View.VISIBLE) android.view.View.GONE else android.view.View.VISIBLE }
+        button("刷新页面事件") { label("页面已刷新") }
+        button("返回验收") { home() }
+    }
+
+    private fun controlScan() {
+        screen("控件扫描验证")
+        val feedback = label("浅层 0 · 深层 0 · 描述 0")
+        var shallow = 0; var deep = 0; var description = 0
+        fun update() { feedback.text = "浅层 $shallow · 深层 $deep · 描述 $description" }
+        // The deep target is visually first; BFS must still choose the shallower duplicate ID.
+        val nested = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            importantForAccessibility = android.view.View.IMPORTANT_FOR_ACCESSIBILITY_YES
+            contentDescription = "嵌套控件容器"
+        }
+        page.addView(nested)
+        val deepButton = button("深层同ID目标") { deep++; update() }.apply { id = android.R.id.button1 }
+        page.removeView(deepButton)
+        nested.addView(deepButton, LinearLayout.LayoutParams(-1, dp(58)))
+        button("浅层同ID目标") { shallow++; update() }.id = android.R.id.button1
+        button("") { description++; update() }.contentDescription = "无ID描述目标"
+        val event = label("页面事件 0")
+        var refreshes = 0
+        button("刷新扫描页面") { event.text = "页面事件 ${++refreshes}" }
         button("返回验收") { home() }
     }
 }

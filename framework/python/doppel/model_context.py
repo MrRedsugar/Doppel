@@ -10,7 +10,7 @@ HISTORY_MARKER = "[older screen nodes omitted; use the latest observation for ta
 PRESSURE_BYTES = 96000
 RECEIPT_BYTES = 1024
 TOTAL_RECEIPT_BYTES = 24000
-MUTATIONS = {"tap", "long_press", "type", "scroll", "back", "home", "launch", "open_document"}
+MUTATIONS = {"tap", "long_press", "type", "scroll", "back", "home", "launch", "open_document", "recents", "notifications", "quick_settings", "split_screen"}
 
 
 def _visible_text(screen):

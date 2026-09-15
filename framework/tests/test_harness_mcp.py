@@ -12,6 +12,7 @@ from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
 from doppel import mcp_server
+from doppel.model_proxy import TOOL_NAMES
 
 
 @contextmanager
@@ -92,7 +93,8 @@ async def call_stdio_tool(env, tmp_path, name="observe", arguments=None):
             return await session.call_tool(name, arguments or {})
 
 
-def test_worker_preserves_task_authorization_through_official_mcp_child(tmp_path):
+@pytest.mark.parametrize("model", ["deepseek-v4-pro", "mimo-v2.5-pro"])
+def test_worker_preserves_task_authorization_through_official_mcp_child(tmp_path, model):
     """Removing the explicit MCP task-token environment must break broker access."""
     with gateway_fixture() as (gateway, state):
         allowed = ("SYSTEMROOT", "WINDIR", "COMSPEC", "PATH", "TEMP", "TMP", "PATHEXT")
@@ -102,7 +104,7 @@ def test_worker_preserves_task_authorization_through_official_mcp_child(tmp_path
             "PYTHONPATH": str(Path(mcp_server.__file__).resolve().parents[1]),
             "PYTHONIOENCODING": "utf-8",
             "DOPPEL_HARNESS_HOME": str(tmp_path / "harness"),
-            "DOPPEL_MODEL": "deepseek-v4-pro",
+            "DOPPEL_MODEL": model,
             "DOPPEL_MAX_OUTPUT": "128",
             "DOPPEL_GOAL": "Read the fixture screen.",
         })
@@ -117,6 +119,10 @@ def test_worker_preserves_task_authorization_through_official_mcp_child(tmp_path
         "body": {"name": "observe", "arguments": {}},
     }]
     assert len(state["model_requests"]) == 2
+    assert all(request["model"] == model for request in state["model_requests"])
+    assert {tool["function"]["name"] for tool in state["model_requests"][0]["tools"]} == {
+        "mcp__android__" + name for name in TOOL_NAMES
+    }
     replay = [item for item in state["model_requests"][1]["messages"] if item["role"] == "tool"]
     assert len(replay) == 1
     assert "Counter: 42" in replay[0]["content"]

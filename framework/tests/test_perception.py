@@ -49,3 +49,52 @@ def test_disabled_control_never_advertises_tap_and_large_overlay_keeps_unnamed()
     lines = compact_observation(observation).splitlines()
     assert "unlabeled at" in next(line for line in lines if line.startswith("overlay "))
     assert "tap" not in next(line for line in lines if line.startswith("disabled "))
+
+
+def test_same_label_exposes_checked_state_without_inferring_it_from_a_counter():
+    screens = []
+    for checked in (False, True):
+        observation = Observation(screen_id="s", package_name="fixture", width=100, height=200, nodes=[
+            Node(id="toggle", text="Like, 9812 likes", clickable=True, checkable=True,
+                 checked=checked, selected=False, bounds=[0, 0, 80, 40]),
+        ])
+        screens.append(compact_observation(observation))
+    assert "checked=false" in screens[0]
+    assert "checked=true" in screens[1]
+    assert screens[0] != screens[1]
+
+
+def test_legacy_nodes_keep_unknown_state_and_do_not_claim_unchecked():
+    legacy = Node(id="old", text="Like", clickable=True, bounds=[0, 0, 80, 40])
+    assert legacy.checkable is None and legacy.checked is None and legacy.selected is None
+    known_toggle = Node(id="toggle", text="Like", clickable=True, checkable=True,
+                        bounds=[0, 40, 80, 80])
+    observation = Observation(screen_id="s", package_name="fixture", width=100, height=200,
+                              nodes=[legacy, known_toggle])
+    lines = compact_observation(observation).splitlines()
+    assert "checked=" not in next(line for line in lines if line.startswith("old "))
+    assert "checked=unknown" in next(line for line in lines if line.startswith("toggle "))
+
+
+def test_selected_and_state_only_nodes_remain_visible_with_bounded_single_line_state():
+    observation = Observation(screen_id="s", package_name="fixture", width=100, height=200, nodes=[
+        Node(id="selected", text="Tab", selected=True, bounds=[0, 0, 80, 30]),
+        Node(id="idle", text="Tab", selected=False, bounds=[0, 30, 80, 60]),
+        Node(id="state", state_description="  Playing\n at\t50%  ", bounds=[0, 60, 80, 90]),
+        Node(id="long", state_description="x" * 4096, bounds=[0, 90, 80, 120]),
+    ])
+    lines = compact_observation(observation).splitlines()
+    assert "selected=true" in next(line for line in lines if line.startswith("selected "))
+    assert "selected=" not in next(line for line in lines if line.startswith("idle "))
+    assert "state=Playing at 50%" in next(line for line in lines if line.startswith("state "))
+    assert "x" * 300 in next(line for line in lines if line.startswith("long "))
+    assert "x" * 301 not in "\n".join(lines)
+    assert len(lines) == 5
+
+
+def test_password_state_description_is_redacted_before_persistence_and_compaction():
+    secret = Node(id="private", text="secret", description="secret", state_description="secret",
+                  password=True, bounds=[0, 0, 80, 30])
+    assert "secret" not in secret.model_dump_json()
+    observation = Observation(screen_id="s", package_name="fixture", width=100, height=200, nodes=[secret])
+    assert "private" not in compact_observation(observation)

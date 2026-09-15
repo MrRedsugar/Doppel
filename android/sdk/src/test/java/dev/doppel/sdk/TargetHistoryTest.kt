@@ -21,6 +21,15 @@ class TargetHistoryTest {
         }
         assertFalse(history().revalidates("old", screen("new", listOf(root.copy(resourceId = "new_form"), ticker, button), 2000), button.id, "tap"))
     }
+    @Test fun controlStateChangesCannotRevalidateAnOldTarget() {
+        val toggle = button.copy(checkable = true, checked = false, selected = false, stateDescription = "Off")
+        val stored = screen("old", listOf(root, ticker, toggle))
+        for (changed in listOf(toggle.copy(checked = true), toggle.copy(checkable = false),
+            toggle.copy(selected = true), toggle.copy(stateDescription = "On"))) {
+            val history = TargetHistory().apply { remember(stored) }
+            assertFalse(history.revalidates("old", screen("new", listOf(root, ticker, changed), 2000), toggle.id, "tap"))
+        }
+    }
     @Test fun packageWindowNavigationRotationAndTruncationRemainStale() {
         for (changed in listOf(fresh().copy(packageName = "other.app"), fresh().copy(windowId = 8), fresh().copy(navigationGeneration = 2), fresh().copy(width = 1920, height = 1080), fresh().copy(complete = false))) {
             assertFalse(history().revalidates("old", changed, button.id, "tap"))

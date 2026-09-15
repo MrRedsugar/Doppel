@@ -51,3 +51,42 @@ def test_bootstrap_rejects_weak_existing_token_and_cli_keeps_secret_off_stdout(t
     token_file.write_text('weak')
     with pytest.raises(ValueError):
         create_app(tmp_path, auto_start=False)
+
+
+def test_standalone_cli_exposes_provider_and_vision_configuration(tmp_path, monkeypatch):
+    from doppel import cli
+    served = []
+    monkeypatch.setattr(cli.uvicorn, "run", lambda app, **kwargs: served.append(app))
+    assert main(["serve", "--data-dir", str(tmp_path), "--provider", "deepseek",
+                 "--model", "deepseek-v4-flash", "--vision-model", "deepseek-v4-flash-vision-exp"]) == 0
+    runtime = served[0].state.runtime
+    assert runtime.config.provider == "deepseek"
+    assert runtime.config.model == "deepseek-v4-flash"
+    assert runtime.config.vision_model == "deepseek-v4-flash-vision-exp"
+    with TestClient(served[0]) as client:
+        health = client.get("/health").json()
+        assert health["provider"] == "deepseek" and health["model"] == "deepseek-v4-flash"
+        assert "token" not in health and "api_key_file" not in health
+
+
+def test_standalone_health_identifies_current_default_model(tmp_path):
+    with TestClient(create_app(tmp_path, auto_start=False)) as client:
+        health = client.get("/health").json()
+        assert health["provider"] == "xiaomi-mimo"
+        assert health["model"] == "mimo-v2.5-pro" and health["vision_model"] == "mimo-v2.5"
+
+
+def test_cli_configures_custom_enhancement_with_separate_secret_file(tmp_path, monkeypatch):
+    from doppel import cli
+    served = []
+    key = tmp_path / "vision-key.txt"; key.write_text("fixture-private-key")
+    monkeypatch.setattr(cli.uvicorn, "run", lambda app, **kwargs: served.append(app))
+    assert main(["serve", "--data-dir", str(tmp_path / "state"), "--provider", "qwen",
+        "--vision-provider", "custom", "--vision-model", "vision-fixture", "--vision-endpoint", "https://fixture.invalid/v1",
+        "--vision-api-key-file", str(key)]) == 0
+    with TestClient(served[0]) as client:
+        config = client.app.state.runtime.config
+        assert config.model == "qwen3.8-flash"
+        assert config.vision_provider == "custom" and config.vision_model == "vision-fixture"
+        assert config.vision_api_key_file == key
+        assert "fixture-private-key" not in client.get("/health").text

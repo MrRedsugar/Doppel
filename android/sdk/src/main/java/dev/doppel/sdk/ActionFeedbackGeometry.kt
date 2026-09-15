@@ -7,7 +7,9 @@ data class ActionFeedbackGeometry(
     val bounds: List<Int>,
     val center: FeedbackPoint,
     val start: FeedbackPoint? = null,
-    val end: FeedbackPoint? = null
+    val end: FeedbackPoint? = null,
+    val path: List<FeedbackPoint> = emptyList(),
+    val durationMs: Long = 650
 ) {
     companion object {
         fun create(kind: String, bounds: List<Int>, width: Int, height: Int, direction: String = ""): ActionFeedbackGeometry? {
@@ -20,10 +22,11 @@ data class ActionFeedbackGeometry(
             if (kind != "scroll") return ActionFeedbackGeometry(kind, visible, center)
             val dx = (right - left) * 0.28f; val dy = (bottom - top) * 0.28f
             val offset = when (direction) {
-                "up" -> FeedbackPoint(0f, -dy)
-                "down" -> FeedbackPoint(0f, dy)
-                "left" -> FeedbackPoint(-dx, 0f)
-                "right" -> FeedbackPoint(dx, 0f)
+                // Accessibility scroll direction names the viewport progression; show the finger motion.
+                "up" -> FeedbackPoint(0f, dy)
+                "down" -> FeedbackPoint(0f, -dy)
+                "left" -> FeedbackPoint(dx, 0f)
+                "right" -> FeedbackPoint(-dx, 0f)
                 else -> return null
             }
             return ActionFeedbackGeometry(kind, visible, center,

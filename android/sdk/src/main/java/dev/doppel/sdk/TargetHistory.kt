@@ -13,7 +13,11 @@ data class TargetNodeSnapshot(
     val enabled: Boolean = true,
     val password: Boolean = false,
     val scrollable: Boolean = false,
-    val childCount: Int = 0
+    val childCount: Int = 0,
+    val checkable: Boolean = false,
+    val checked: Boolean = false,
+    val selected: Boolean = false,
+    val stateDescription: String = ""
 )
 
 data class TargetScreenSnapshot(

@@ -25,6 +25,8 @@ class LoginAssist(private val context: Context) {
         }
         private fun scheduleCleanup() { cleanupHandler.removeCallbacks(cleanup); cleanupHandler.postDelayed(cleanup, 30_000) }
         fun redact(packageName: String, value: String) = session.redact(packageName, value)
+        internal fun protectPassword(value: String) = session.protectPassword(value)
+        internal fun containsPrivateValue(value: String) = session.containsPrivateValue(value)
         fun sensitiveSessionActive() = session.active()
         fun clearSession() = session.clear()
     }
@@ -89,6 +91,17 @@ class LoginAssist(private val context: Context) {
             component.packageName == context.packageName && component.className == LoginNotificationService::class.java.name
         } == true }
 
+    /** Availability only. The run-bound code stays local and is not consumed by an observation. */
+    internal fun taskStatus(packageName: String, runId: String? = null): JSONObject = runCatching {
+        val profile = profiles().singleOrNull { it.packageName == packageName && it.enabled }
+        val state = session.readiness(packageName, runId.orEmpty())
+        JSONObject().put("package_name", packageName).put("enabled", profile != null)
+            .put("phone_available", profile != null && (profile.phone.isNotBlank() || commonPhone().isNotBlank()))
+            .put("notification_access", notificationAccess()).put("session_started", state.active)
+            .put("code_ready", state.codeReady).put("code_state", state.state).put("expires_in_ms", state.expiresInMs)
+    }.getOrElse { JSONObject().put("package_name", packageName).put("enabled", false).put("phone_available", false)
+        .put("notification_access", notificationAccess()).put("session_started", false).put("code_ready", false).put("code_state", "inactive").put("expires_in_ms", 0) }
+
     fun valueFor(kind: String, packageName: String, runId: String): String? {
         require(kind in setOf("login_phone", "login_code"))
         val profile = profiles().firstOrNull { it.packageName == packageName && it.enabled }
@@ -96,6 +109,7 @@ class LoginAssist(private val context: Context) {
         if (kind == "login_phone") {
             val phone = profile.phone.ifBlank { commonPhone() }
             check(phone.isNotEmpty()) { "请先设置常用手机号" }
+            session.protectPassword(phone)
             session.begin(packageName, runId, phone, profile.signature)
             scheduleCleanup()
             return phone

@@ -127,14 +127,21 @@ class ExtensionManager:
                 raise Conflict('Extension already exists') from error
         return config
 
-    def update_config(self, owner, name, payload):
+    def update_config(self, owner, name, payload, *, expected_revision=None):
         config = self._config(payload)
         if config['name'] != name:
             raise ValueError('Extension name cannot change during update')
         with closing(self._connect()) as db:
-            cursor = db.execute('UPDATE configurations SET payload=? WHERE owner=? AND name=?', (json.dumps(config), self._owner(owner), name))
-            if not cursor.rowcount:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT payload FROM configurations WHERE owner=? AND name=?', (self._owner(owner), name)).fetchone()
+            if row is None:
                 raise NotFound('Extension not found')
+            previous = json.loads(row['payload'])
+            if expected_revision is not None and previous['revision'] != expected_revision:
+                raise Conflict('Extension configuration changed; reload before saving')
+            if config['url'] != previous['url'] and config['allowed_tools']:
+                raise ValueError('Changing an extension URL requires clearing its existing tool grants')
+            db.execute('UPDATE configurations SET payload=? WHERE owner=? AND name=?', (json.dumps(config), owner, name))
             db.commit()
         return config
 

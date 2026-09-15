@@ -7,23 +7,38 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import Conflict, NotFound, PermissionDenied, ScopeDenied
-from .models import Command, CommandResult, Device, Event, Observation, Run, utc_now
+from .models import Command, CommandResult, Device, Event, Observation, Run, ConversationMessage, TaskStateUpdate, utc_now
 from .policy import ActionPolicy
 from .store import Store
+from .providers import DEFAULT_PROVIDER, resolve_configuration
 
 TERMINAL = {"completed", "failed", "cancelled"}
+TAKEOVER_REASONS = {"verification", "login", "payment", "interruption"}
 
 
 @dataclass
 class RuntimeConfig:
     data_dir: Path
     api_key_file: Path | None = None
-    model: str = "deepseek-v4-pro"
+    model: str | None = None
     host_url: str = "http://127.0.0.1:8765"
     auto_start: bool = True
     command_timeout: float = 90
     max_model_calls: int = 40
     max_output_tokens: int = 1600
+    provider: str = DEFAULT_PROVIDER
+    vision_model: str | None = None
+    provider_endpoint: str | None = None
+    provider_headers_file: Path | None = None
+    vision_provider: str | None = None
+    vision_endpoint: str | None = None
+    vision_api_key_file: Path | None = None
+    vision_headers_file: Path | None = None
+    vision_enhancement_enabled: bool | None = None
+
+    def __post_init__(self):
+        for name, value in resolve_configuration(self).items():
+            setattr(self, name, value)
 
 
 class DoppelRuntime:
@@ -87,13 +102,50 @@ class DoppelRuntime:
     def runs(self, owner):
         return [Run.model_validate_json(r["payload"]) for r in self.store.all("SELECT payload FROM runs WHERE owner=? ORDER BY rowid DESC LIMIT 200", (owner,))]
 
-    def create_run(self, owner, device_id, goal, mode, allowed_packages=None):
+    def create_run(self, owner, device_id, goal, mode, allowed_packages=None, *, parent_run_id=None,
+                   conversation_enabled=True, source="user"):
         self._device(owner, device_id)
         if not goal.strip() or len(goal) > 12000 or mode not in {"ask", "assist", "full"}:
             raise ValueError("Invalid goal or mode")
         token = secrets.token_urlsafe(32)
-        run = Run(id=secrets.token_hex(16), device_id=device_id, goal=goal.strip(), mode=mode, status="running", created_at=utc_now(), allowed_packages=allowed_packages or [])
+        if not isinstance(conversation_enabled, bool):
+            raise ValueError("conversation_enabled must be boolean")
+        if source not in {"user", "schedule", "trigger"}:
+            raise ValueError("Invalid run source")
+        if source != "user" and conversation_enabled:
+            raise ValueError("Background tasks cannot create conversations")
+        if not conversation_enabled and parent_run_id is not None:
+            if source != "user":
+                raise ValueError("Background task cannot be attached to a conversation")
+            raise Conflict("Background task cannot be attached to a conversation")
+        conversation_id = None
+        if conversation_enabled and parent_run_id is not None:
+            parent = self.get_run(owner, parent_run_id)
+            if parent.device_id != device_id or parent.status not in TERMINAL:
+                raise Conflict("Previous conversation must be finished on the same device")
+            if not parent.conversation_enabled:
+                raise Conflict("Previous task has no conversation")
+            conversation_id = parent.conversation_id or parent.id
+        elif conversation_enabled:
+            conversation_id = "conversation-" + secrets.token_hex(12)
+        title = " ".join(goal.strip().split())[:36]
+        for prefix in ("请帮我 ", "帮我 ", "请 "):
+            if title.startswith(prefix):
+                title = title[len(prefix):]
+                break
+        run = Run(id=secrets.token_hex(16), device_id=device_id, goal=goal.strip(), title=title or "新任务",
+                  conversation_id=conversation_id, conversation_enabled=conversation_enabled,
+                  source=source,
+                  mode=mode, status="running", created_at=utc_now(),
+                  allowed_packages=allowed_packages or [], parent_run_id=parent_run_id,
+                  conversation_messages=[ConversationMessage(id=secrets.token_hex(8), role="user", text=goal.strip(), kind="request", created_at=utc_now())] if conversation_enabled else [])
         with self.store.transaction() as db:
+            if parent_run_id is not None:
+                parent = self.get_run(owner, parent_run_id)
+                if parent.device_id != device_id or parent.status not in TERMINAL:
+                    raise Conflict("Previous conversation must be finished on the same device")
+                if not parent.conversation_enabled:
+                    raise Conflict("Previous task has no conversation")
             active = db.execute("SELECT payload FROM runs WHERE device_id=?", (device_id,)).fetchall()
             if any(json.loads(r["payload"])["status"] not in TERMINAL for r in active):
                 raise Conflict("This device already has an active task")
@@ -103,6 +155,31 @@ class DoppelRuntime:
         self.run_tokens[run.id] = token
         return run
 
+    def conversation(self, owner, run_id):
+        """Bounded source history, resolved afresh so deletion revokes future context."""
+        first = self.get_run(owner, run_id)
+        entries, seen, remaining = [], set(), 24000
+        current = first
+        while current and current.id not in seen and len(entries) < 12 and remaining > 0:
+            if current.device_id != first.device_id:
+                break
+            seen.add(current.id)
+            if not current.conversation_enabled:
+                break
+            goal = current.goal[:min(3000, remaining)]; remaining -= len(goal)
+            message = current.message[:min(4000, remaining)]; remaining -= len(message)
+            entries.append(dict(id=current.id, conversation_id=current.conversation_id or current.id,
+                                title=current.title or goal.splitlines()[0][:36], goal=goal, message=message,
+                                status=current.status, created_at=current.created_at,
+                                messages=[item.model_dump() for item in current.conversation_messages]))
+            if not current.parent_run_id:
+                break
+            try:
+                current = self.get_run(owner, current.parent_run_id)
+            except NotFound:
+                break
+        return list(reversed(entries))
+
     def authorize_run_token(self, run_id, token):
         row = self._row(run_id)
         if not secrets.compare_digest(row["token_hash"], hashlib.sha256(token.encode()).hexdigest()):
@@ -110,8 +187,32 @@ class DoppelRuntime:
         return row["owner"]
 
     def _update(self, db, run, kind="state"):
+        if run.status == "completed":
+            run.task_state["phase"] = "completed"
+            progress = run.task_state.get("progress")
+            if progress and progress.get("plan"):
+                run.task_state["progress"] = dict(progress, completed=len(progress["plan"]), total_known=True)
+        if run.message and run.conversation_enabled:
+            duplicate = run.conversation_messages and run.conversation_messages[-1].role == "assistant" and run.conversation_messages[-1].text == run.message
+            if not duplicate:
+                run.conversation_messages.append(ConversationMessage(id=secrets.token_hex(8), role="assistant",
+                    text=run.message[:12000], kind="progress", created_at=utc_now()))
+                del run.conversation_messages[:-80]
         db.execute("UPDATE runs SET payload=? WHERE id=?", (run.model_dump_json(), run.id))
         self.store.event(db, run.id, kind, run.message, {"status": run.status})
+
+    def update_task_state(self, run_id, value):
+        """Merge bounded model display metadata without queuing commands or changing run status."""
+        update = TaskStateUpdate.model_validate(value).model_dump(exclude_unset=True, exclude_none=True)
+        with self.store.transaction() as db:
+            run = Run.model_validate_json(self._row(run_id)["payload"])
+            if run.status != "running":
+                raise Conflict("Task state changed before progress update")
+            if any(run.task_state.get(key) != item for key, item in update.items()):
+                run.task_state.update(update)
+                db.execute("UPDATE runs SET payload=? WHERE id=?", (run.model_dump_json(), run.id))
+                self.store.event(db, run.id, "task_progress", "", {"task_state": run.task_state})
+        return run
 
     def _finish_commands(self, db, run, reason="task_ended"):
         for row in db.execute("SELECT id FROM commands WHERE run_id=? AND result IS NULL", (run.id,)).fetchall():
@@ -149,7 +250,9 @@ class DoppelRuntime:
             run = Run.model_validate_json(row["payload"])
             if run.status in TERMINAL:
                 raise Conflict("Task already ended")
-            run.status, run.message = "paused", "已暂停"
+            if run.status == "paused":
+                return run
+            run.status, run.message = "paused", "你已暂停任务，继续时将重新观察屏幕"
             self._update(db, run)
         return run
 
@@ -161,7 +264,7 @@ class DoppelRuntime:
             run = Run.model_validate_json(row["payload"])
             if run.status != "paused":
                 raise Conflict("Task is not paused")
-            if run.pending_request and run.pending_request.get("reason") in {"verification", "login"}:
+            if run.pending_request and run.pending_request.get("reason") in TAKEOVER_REASONS:
                 run.pending_request = None
                 run.requires_fresh_observation = True
                 db.execute("UPDATE runs SET observation=NULL WHERE id=?", (run_id,))
@@ -195,7 +298,12 @@ class DoppelRuntime:
             return run
         if run.status == "paused" and run.pending_request and run.pending_request.get("reason") == reason:
             return run
-        message = "请在手机上手动完成安全验证，再点击继续。" if reason == "verification" else "请在手机上完成登录设置或手动登录，再点击继续。"
+        message = {
+            "verification": "请在手机上手动完成安全验证，再点击继续。",
+            "login": "请在手机上完成登录设置或手动登录，再点击继续。",
+            "payment": "付款操作需要你在手机上手动处理。确认结果后再继续，AI 不会重放这次操作。",
+            "interruption": "来电、响铃或系统窗口中断了操作。请在手机上处理后点击继续，任务将重新观察屏幕。",
+        }[reason]
         run.status, run.message = "paused", message
         run.requires_fresh_observation = True
         run.pending_request = {"id": secrets.token_hex(16), "kind": "input", "reason": reason,
@@ -204,6 +312,8 @@ class DoppelRuntime:
         return run
 
     def queue_command(self, run_id, kind, **fields):
+        if "payment_consent_id" in fields:
+            raise PermissionDenied("payment_consent_id is a host-only field supplied from the device observation")
         command = Command(id=secrets.token_hex(16), run_id=run_id, kind=kind, **fields)
         with self.store.transaction() as db:
             row = db.execute("SELECT payload,observation FROM runs WHERE id=?", (run_id,)).fetchone()
@@ -227,9 +337,16 @@ class DoppelRuntime:
                     if "cn.wps.moffice_eng" not in run.allowed_packages:
                         raise PermissionDenied("Opening documents requires WPS in the authorized packages")
                     command.package_name = "cn.wps.moffice_eng"
+            node = next((node for node in observation.nodes if node.id == command.target), None) if kind == "tap" and observation else None
+            if (node is not None and command.screen_id == observation.screen_id and
+                    self.policy.payment_target(node, observation) and not self.policy.requires_manual_financial(observation)):
+                command.payment_consent_id = observation.payment_consent_id
             verdict = self.policy.evaluate(run.mode, command, observation)
             if verdict.decision == "deny":
                 raise Conflict(verdict.reason)
+            checkable = node is not None and node.checkable is True
+            if checkable and command.desired_checked is None and verdict.decision != "manual":
+                raise ValueError("Target is checkable; provide desired_checked=true or false for the intended final state. Use observe to verify state instead of repeating a tap.")
             if verdict.decision == "manual":
                 if verdict.human_takeover:
                     self._pause_for_takeover(db, run, verdict.human_takeover)
@@ -256,10 +373,21 @@ class DoppelRuntime:
         self._device(owner, device_id)
         with self.store.transaction() as db:
             db.execute("UPDATE devices SET last_seen=? WHERE id=?", (utc_now(), device_id))
-            rows = db.execute("SELECT c.payload,r.payload AS run FROM commands c JOIN runs r ON c.run_id=r.id WHERE r.device_id=? AND c.result IS NULL AND c.state='queued' ORDER BY c.rowid", (device_id,)).fetchall()
+            rows = db.execute("SELECT c.payload,r.payload AS run,r.observation FROM commands c JOIN runs r ON c.run_id=r.id WHERE r.device_id=? AND c.result IS NULL AND c.state='queued' ORDER BY c.rowid", (device_id,)).fetchall()
             for row in rows:
-                if json.loads(row["run"])["status"] == "running":
-                    return Command.model_validate_json(row["payload"])
+                run = Run.model_validate_json(row["run"])
+                if run.status == "running":
+                    command = Command.model_validate_json(row["payload"])
+                    observation = Observation.model_validate_json(row["observation"]) if row["observation"] else None
+                    if command.payment_consent_id and self.policy.evaluate("full", command, observation).decision != "allow":
+                        result = CommandResult(command_id=command.id, run_id=run.id, status="blocked", observation=observation,
+                                               message="付款授权或页面已变化，未派发付款操作", data={"human_takeover": "payment"})
+                        db.execute("UPDATE commands SET state='finished',result=? WHERE id=?", (result.model_dump_json(), command.id))
+                        self._pause_for_takeover(db, run, "payment")
+                        self.store.event(db, run.id, "command_result", result.message,
+                                         {"command_id": command.id, "status": result.status, "human_takeover": "payment"})
+                        continue
+                    return command
         return None
 
     def submit_result(self, owner, device_id, result: CommandResult):
@@ -285,12 +413,14 @@ class DoppelRuntime:
             reason = result.data.get("human_takeover") if result.status == "blocked" else None
             if self.policy.requires_verification(result.observation):
                 reason = "verification"
-            if reason in ("verification", "login"):
+            if reason in TAKEOVER_REASONS:
                 self._pause_for_takeover(db, run, reason)
             elif run.status == "running" and run.requires_fresh_observation and result.status == "ok" and result.observation and json.loads(row["payload"])["kind"] in {"observe", "screenshot"}:
                 run.requires_fresh_observation = False
                 self._update(db, run, "fresh_observation")
-            self.store.event(db, result.run_id, "command_result", result.message or result.status, {"command_id": result.command_id, "status": result.status})
+            state_data = {key: result.data[key] for key in ("no_op", "checked", "desired_checked") if type(result.data.get(key)) is bool}
+            self.store.event(db, result.run_id, "command_result", result.message or result.status,
+                             {"command_id": result.command_id, "status": result.status, **state_data})
 
     def command_result(self, command_id):
         row = self.store.one("SELECT result FROM commands WHERE id=?", (command_id,))
@@ -371,7 +501,7 @@ class DoppelRuntime:
         if self.policy.requires_verification(result.observation):
             reason = "verification"
         reason = reason or (run.pending_request or {}).get("reason")
-        if reason not in ("verification", "login"):
+        if reason not in TAKEOVER_REASONS:
             return result
         while True:
             while run.status == "paused":

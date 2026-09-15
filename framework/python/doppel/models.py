@@ -1,7 +1,11 @@
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, model_validator
+
+
+PaymentConsentId = Annotated[StrictStr, Field(min_length=1, max_length=128,
+    pattern=r"^payment-v1:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")]
 
 
 def utc_now() -> str:
@@ -25,12 +29,17 @@ class Node(Model):
     scrollable: bool = False
     password: bool = False
     resource_id: str = ""
+    checkable: bool | None = None
+    checked: bool | None = None
+    selected: bool | None = None
+    state_description: str | None = Field(default=None, max_length=4096)
 
     @model_validator(mode="after")
     def redact_password(self):
         if self.password:
             self.text = ""
             self.description = ""
+            self.state_description = None
         if self.bounds[2] < self.bounds[0] or self.bounds[3] < self.bounds[1]:
             raise ValueError("Invalid node bounds")
         return self
@@ -43,9 +52,10 @@ class Observation(Model):
     height: int = Field(gt=0, le=16384)
     nodes: list[Node] = Field(default_factory=list, max_length=600)
     captured_at: int = 0
+    payment_consent_id: PaymentConsentId | None = None
 
 
-CommandKind = Literal["observe", "launch", "tap", "long_press", "type", "login_phone", "login_code", "scroll", "back", "home", "wait", "screenshot", "open_document"]
+CommandKind = Literal["observe", "launch", "tap", "long_press", "type", "login_phone", "login_code", "scroll", "back", "home", "recents", "notifications", "quick_settings", "split_screen", "wait", "screenshot", "open_document"]
 
 
 class Command(Model):
@@ -60,9 +70,15 @@ class Command(Model):
     duration_ms: int | None = Field(default=None, ge=0, le=10000)
     include_screenshot: bool = False
     uri: str | None = None
+    desired_checked: StrictBool | None = None
+    payment_consent_id: PaymentConsentId | None = None
 
     @model_validator(mode="after")
     def require_fields(self):
+        if self.payment_consent_id is not None and self.kind != "tap":
+            raise ValueError("payment_consent_id is only supported for tap")
+        if self.desired_checked is not None and self.kind != "tap":
+            raise ValueError("desired_checked is only supported for tap")
         if self.kind in {"tap", "long_press", "type", "login_phone", "login_code"} and (not self.target or not self.screen_id):
             raise ValueError("A current screen_id and target are required")
         if self.kind == "type" and self.text is None:
@@ -99,17 +115,53 @@ class Device(Model):
 RunStatus = Literal["queued", "running", "paused", "awaiting_approval", "awaiting_input", "completed", "failed", "cancelled"]
 
 
+class ConversationMessage(Model):
+    id: str
+    role: Literal["user", "assistant", "system"]
+    text: str = Field(max_length=12000)
+    kind: str = Field(default="message", max_length=40)
+    created_at: str
+
+
+class TaskProgress(Model):
+    """A revisable display of observed milestones, never an executable action plan."""
+    plan: list[Annotated[StrictStr, Field(min_length=1, max_length=60)]] = Field(max_length=5)
+    completed: Annotated[StrictInt, Field(ge=0, le=5)]
+    total_known: StrictBool
+
+    @model_validator(mode="after")
+    def check_milestones(self):
+        if self.completed > len(self.plan) or any(not item.strip() for item in self.plan) or not self.plan and self.total_known:
+            raise ValueError("Invalid task progress milestones")
+        return self
+
+
+class TaskStateUpdate(Model):
+    phase: Annotated[StrictStr, Field(max_length=120)] = ""
+    progress: TaskProgress | None = None
+
+
 class Run(Model):
     id: str
     device_id: str
     goal: str
+    title: str = ""
+    conversation_id: str | None = None
+    # Background schedule/trigger runs are tasks only and do not participate in
+    # the user conversation transcript.  Keep the flag explicit so clients can
+    # distinguish those runs without inferring from an empty message list.
+    conversation_enabled: bool = True
+    source: Literal["user", "schedule", "trigger"] = "user"
     mode: Literal["ask", "assist", "full"]
     status: RunStatus
     message: str = ""
     created_at: str
+    parent_run_id: str | None = None
     pending_request: dict[str, Any] | None = None
     requires_fresh_observation: bool = False
     allowed_packages: list[str] = Field(default_factory=list, max_length=40)
+    conversation_messages: list[ConversationMessage] = Field(default_factory=list, max_length=80)
+    task_state: dict[str, Any] = Field(default_factory=dict)
 
 
 class Event(Model):

@@ -1,7 +1,7 @@
 package dev.doppel.sdk
 
 import android.app.Activity
-import android.app.AlertDialog
+import android.content.DialogInterface
 import android.content.Intent
 import android.os.Bundle
 import android.provider.Settings
@@ -50,7 +50,7 @@ class LoginSettingsActivity : Activity() {
         } catch (e: IllegalStateException) { content.addView(UiTheme.text(this, e.message.orEmpty(), color = UiTheme.danger)) }
         heading("本机资料")
         content.addView(UiTheme.row(this, "删除全部登录资料", "常用手机号与应用授权", android.R.drawable.ic_menu_delete) {
-            AlertDialog.Builder(this).setTitle("删除登录资料？").setNegativeButton("取消", null).setPositiveButton("删除") { _, _ -> login.clearAll(); render() }.show()
+            UiDialog.Builder(this).setTitle("删除登录资料？").setNegativeButton("取消", null).setPositiveButton("删除") { _, _ -> login.clearAll(); render() }.show()
         })
     }
     private fun heading(title: String) { content.addView(UiTheme.text(this, title, 13f, UiTheme.muted, true).apply { setPadding(0, dp(26), 0, dp(12)) }) }
@@ -58,29 +58,23 @@ class LoginSettingsActivity : Activity() {
     private fun editProfile(existing: LoginProfile?) {
         val apps = packageManager.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
             .filter { it.activityInfo.packageName != packageName }.distinctBy { it.activityInfo.packageName }.sortedBy { it.loadLabel(packageManager).toString() }
-        val fields = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(24), dp(12), dp(24), dp(16)) }
-        val selected = Spinner(this).apply {
-            adapter = ArrayAdapter(this@LoginSettingsActivity, android.R.layout.simple_spinner_dropdown_item, apps.map { it.loadLabel(packageManager).toString() })
-            minimumHeight = dp(48)
-        }
+        val fields = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        var selectedIndex = 0
+        val selected = UiTheme.selector(this, "选择应用", apps.map { it.loadLabel(packageManager).toString() }, selectedIndex) { selectedIndex = it }
         if (existing == null) fields.addView(selected) else fields.addView(UiTheme.text(this, existing.packageName, 13f, UiTheme.muted))
         val phone = UiTheme.field(this, "使用常用手机号", existing?.phone.orEmpty()).apply { inputType = android.text.InputType.TYPE_CLASS_PHONE }
         val marker = UiTheme.field(this, "短信签名，例如：美团", existing?.signature.orEmpty())
-        val enabled = Switch(this).apply {
-            text = "允许自动填入手机号与登录验证码"; isChecked = existing?.enabled ?: false; minHeight = dp(64)
-            textSize = 14f; letterSpacing = 0f; setTextColor(UiTheme.ink); setPadding(0, dp(12), 0, dp(8)); switchPadding = dp(12)
-            thumbTintList = android.content.res.ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()), intArrayOf(UiTheme.ink, UiTheme.muted))
-        }
+        val enabled = UiTheme.toggle(this, "允许自动填入手机号与登录验证码", existing?.enabled ?: false).apply { textSize = 14f; minHeight = dp(64) }
         fields.addView(phone, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
         fields.addView(marker, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
         fields.addView(enabled)
-        val dialog = AlertDialog.Builder(this).setTitle(if (existing == null) "授权应用" else "应用登录资料")
-            .setView(ScrollView(this).apply { addView(fields) }).setNegativeButton("取消", null).setPositiveButton("保存", null)
+        val dialog = UiDialog.Builder(this).setTitle(if (existing == null) "授权应用" else "应用登录资料")
+            .setView(fields).setNegativeButton("取消", null).setPositiveButton("保存", null)
         if (existing != null) dialog.setNeutralButton("删除") { _, _ -> attempt { login.remove(existing.packageName); render() } }
         val shown = dialog.show()
-        shown.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+        shown.getButton(DialogInterface.BUTTON_POSITIVE).setOnClickListener {
             attempt {
-                val app = existing?.packageName ?: apps.getOrNull(selected.selectedItemPosition)?.activityInfo?.packageName ?: error("没有可授权应用")
+                val app = existing?.packageName ?: apps.getOrNull(selectedIndex)?.activityInfo?.packageName ?: error("没有可授权应用")
                 login.save(LoginProfile(app, phone.text.toString().trim(), marker.text.toString().trim(), enabled.isChecked)); shown.dismiss(); render()
             }
         }

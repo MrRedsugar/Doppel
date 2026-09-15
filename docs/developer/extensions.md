@@ -6,6 +6,10 @@ aliases. These interfaces do not assume Python or Node exists on Android.
 
 ## Skills
 
+The developer APK also supports [phone-local progressive Skills](direct-skills.md)
+in direct mode, with an imported catalogue and a versioned Arknights reference.
+MCP services still use the gateway; a Skill never grants MCP/device capabilities.
+
 ```python
 from doppel.skills import SkillCatalog
 
@@ -121,6 +125,12 @@ POST and PUT accept this exact JSON object; arrays default to empty:
 }
 ```
 
+PUT additionally accepts optional `expected_revision`, the 32-character revision
+returned by GET/POST/PUT or discovery. A stale revision returns 409 and performs
+no update. Android always sends it when saving a configuration or tool grants.
+Changing a service URL requires empty grants; discover and explicitly grant the
+new endpoint's tools after saving. Other service configurations are unaffected.
+
 Names in these arrays are the server's original tool names, without the
 mcp.reporting prefix. read_only_tools must be a subset of allowed_tools. Start
 with empty grants, discover tools, then PUT explicitly selected permissions.
@@ -178,3 +188,87 @@ read-only classification, approval snapshots, JSON Schema rejection, timeout,
 cancellation, pre-dispatch revocation and a real HTTP provider through the API and
 manager. The local HTTP fixture uses one event loop and bounded Uvicorn graceful
 shutdown to avoid leaving Windows Proactor/SSE request tasks in a server thread.
+
+## Android extension management
+
+`dev.doppel.sdk.ExtensionSettingsActivity` presents separate Services and Skills
+tabs using the shared theme and sheets. It lists all named services, supports
+add/edit/delete and discovery, and saves explicit per-tool allow/read-only
+choices. Descriptions and external read-only annotations never select grants.
+New services have no allowed tools. The current HTTP connector has no OAuth or
+arbitrary authentication-header editor; do not paste account passwords into a
+service name or URL. Android's developer direct-model mode displays these server
+features as unavailable instead of contacting an old gateway configuration.
+
+Register the Activity with `android:exported="false"`. No external deep-link
+intent filter is required. The document picker requires a user-selected
+`content://` URI and temporarily reads that file; no broad storage permission or
+persistent file grant is requested. A successful import becomes available to the
+same account's `list_skills`, `read_skill` and `read_skill_resource` runtime tools.
+
+## User Skills import API
+
+These authenticated routes are included with `create_extension_router` and the
+ordinary gateway `/v1` router. They are setup APIs, never model execution tools.
+
+| Route | Behavior |
+| --- | --- |
+| GET /skills | List host Skills and this account's imports under `items` |
+| POST /skills/import | Import one complete `text/markdown` or `application/zip` body; 201 |
+| GET /skills/{name} | Read metadata and instructions, with `source` and `trusted=false` |
+| GET /skills/{name}/resources?path=references/example.md | Read one bounded UTF-8 resource |
+| DELETE /skills/{name} | Remove only this account's imported Skill |
+
+Raw markdown must contain valid `SKILL.md` frontmatter. ZIPs contain exactly one
+`SKILL.md`, either at the archive root or beneath one enclosing directory. Every
+file belongs to that Skill. The metadata name becomes its installed directory
+name; enclosing archive directory names are not trusted identifiers.
+
+```text
+notes/SKILL.md
+notes/references/example.md
+notes/scripts/example.py
+```
+
+Maximums are 2 MiB compressed upload, 2 MiB total expanded data, 128 ZIP members,
+100 files, 64 KiB per file, eight path components and 240 characters per archive
+path. A raw `SKILL.md` is at most 64 KiB. Uploads have a 15-second total deadline.
+Reject absolute paths, traversal, backslashes, alternate data streams, Windows
+device names, trailing dots/spaces, control characters, duplicate/case-colliding
+paths, file/directory collisions, links, special files, encrypted members,
+malformed ZIPs and invalid metadata. The entire package is validated before any
+file is published; a complete directory is installed with one rename.
+
+Imports are stored in `data_dir/imported-skills/<sha256-of-owner>/<skill-name>`.
+No account-provided identifier is used directly as a path. Host Skills remain
+under `data_dir/skills`, are listed as `source="host"`, and cannot be removed or
+overridden through this API. Imports use `source="imported"`; names must be
+unique across host and account imports, ignoring case. Duplicates return 409;
+remove the account import explicitly before replacing it. There are at most 100
+imports per account, independent of the host catalog's limit.
+
+Package scripts are retained only as data. Importing never executes, installs
+dependencies, contacts external URLs, creates a task, marks a Skill trusted, or
+grants MCP/device capabilities. Every normal authorization boundary still applies.
+Reading external instructions is not authorization to perform their instructions.
+Deleting a Skill prevents subsequent reads; it cannot erase text already loaded
+into an active model context. This filesystem implementation is intended for one
+gateway process and a host-owned data directory; multi-replica deployments need
+shared catalog/storage coordination. A hostile local process is not sandboxed.
+
+## Reserved community handoff
+
+There is no live community catalog or automatic network importer in this release.
+The reserved future contract is:
+
+```text
+doppel://skills/import?v=1&url=<percent-encoded-https-zip-url>&sha256=<64-hex-digest>
+```
+
+This is documentation only: the current APK does not register or resolve this
+scheme. A future implementation must first show publisher, package name, download
+origin, digest and requested dependencies, then require the user's import action.
+It must restrict redirects and download size, verify the exact digest and apply
+the same archive checks. A URI, publisher label or package manifest cannot grant
+trust or execution permissions. Community service authentication, signatures and
+revocation policies remain future server work, not working controls in this UI.

@@ -47,6 +47,10 @@ class SkillCatalog:
     def read_skill(self, name: str) -> dict:
         folder = self._folder(name)
         content = self._read(contained_path(folder, 'SKILL.md'), self.max_skill_bytes)
+        return self.parse(content, name)
+
+    @staticmethod
+    def parse(content: str, expected_name: str | None = None) -> dict:
         lines = content.splitlines()
         if not lines or lines[0] != '---':
             raise ValueError('SKILL.md requires YAML frontmatter')
@@ -57,9 +61,10 @@ class SkillCatalog:
             if any(isinstance(event, yaml.AliasEvent) for event in yaml.parse(frontmatter)):
                 raise ValueError('YAML aliases are not supported')
             meta = yaml.safe_load(frontmatter)
-        except (yaml.YAMLError, ValueError) as exc:
+        except (yaml.YAMLError, ValueError, RecursionError) as exc:
             raise ValueError('Invalid skill frontmatter') from exc
-        if not isinstance(meta, dict) or meta.get('name') != name or not isinstance(meta.get('description'), str):
+        name = meta.get('name') if isinstance(meta, dict) else None
+        if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', name) or (expected_name is not None and name != expected_name) or not isinstance(meta.get('description'), str):
             raise ValueError('Skill name must match folder and description must be text')
         dependencies = meta.get('dependencies', {})
         if not isinstance(dependencies, dict) or set(dependencies) - {'runtimes', 'tools'}:

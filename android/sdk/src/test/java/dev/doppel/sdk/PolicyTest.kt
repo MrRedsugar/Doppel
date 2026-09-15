@@ -35,6 +35,8 @@ class PolicyTest {
             assertEquals("blocked", Policy.validate(kind, "s", "s", Target("支付验证码", false, true)))
             assertEquals("blocked", Policy.validate(kind, "s", "s", Target("Password", true, true)))
         }
+        assertEquals("ok", Policy.validate("login_code", "s", "s", Target("登录验证码", true, true)))
+        assertEquals("blocked", Policy.validate("login_code", "s", "s", Target("支付验证码", true, true)))
     }
     @Test fun otpFieldDetectionDoesNotMaskOrdinarySearchOrPhoneLabels() {
         for (label in listOf("登录验证码", "动态码", "verification code", "app:id/otp_input", "one-time code")) assertTrue(Policy.codeInput(label))

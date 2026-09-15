@@ -5,7 +5,12 @@ from typing import Annotated, Any, Literal
 import httpx
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
+
+if __package__:
+    from .models import TaskStateUpdate
+else:
+    from models import TaskStateUpdate
 
 server = MCPServer("Doppel Android tools")
 
@@ -36,21 +41,29 @@ async def invoke(name: str, arguments: dict[str, Any]):
 
 
 @server.tool()
-async def observe() -> dict:
+async def observe(task_state: TaskStateUpdate | None = None) -> dict:
     """Read the current Android screen as concise text with stable node IDs and screen_id."""
-    return await invoke("observe", {})
+    return await invoke("observe", {"task_state": task_state.model_dump(exclude_unset=True)} if task_state is not None else {})
 
 
 @server.tool()
-async def finish_task(outcome: Literal["completed", "failed"], summary: str, evidence_ids: list[str] = []) -> dict:
+async def finish_task(outcome: Literal["completed", "failed"], summary: str, evidence_ids: list[str] = [], task_state: TaskStateUpdate | None = None) -> dict:
     """Report the task outcome for host validation; completion requires evidence_ids returned by successful tools."""
-    return await invoke("finish_task", {"outcome": outcome, "summary": summary, "evidence_ids": evidence_ids})
+    arguments = {"outcome": outcome, "summary": summary, "evidence_ids": evidence_ids}
+    if task_state is not None:
+        arguments["task_state"] = task_state.model_dump(exclude_unset=True)
+    return await invoke("finish_task", arguments)
 
 
 @server.tool()
-async def act(action: Literal["launch", "tap", "long_press", "type", "scroll", "back", "home", "wait", "open_document"], target: str | None = None, screen_id: str | None = None, text: str | None = None, package_name: str | None = None, direction: Literal["up", "down", "left", "right"] | None = None, duration_ms: int | None = None, uri: str | None = None) -> dict:
-    """Execute one device action, then inspect the result. Tap/long_press/type require current screen_id and target. Long press requires a long_press node and uses Android's action duration. Payment stays manual."""
-    return await invoke("act", locals())
+async def act(action: Literal["launch", "tap", "long_press", "type", "scroll", "back", "home", "recents", "notifications", "quick_settings", "split_screen", "wait", "open_document"], target: str | None = None, screen_id: str | None = None, text: str | None = None, package_name: str | None = None, direction: Literal["up", "down", "left", "right"] | None = None, duration_ms: int | None = None, uri: str | None = None, desired_checked: Annotated[StrictBool | None, Field(description="Tap only: intended checked state, required for a checkable control. An already satisfied state returns an observed no-op.")] = None, task_state: TaskStateUpdate | None = None) -> dict:
+    """Execute one device action, then inspect the result. Tap/long_press/type require current screen_id and target. Checkable taps require desired_checked; use observe to verify state. Long press requires a long_press node and uses Android's action duration. Ordinary payments require device delegated_payment=enabled and host approval policy; credentials, transfers and persistent mandates stay manual. A successful tap does not prove payment success."""
+    arguments = dict(locals())
+    if task_state is None:
+        arguments.pop("task_state")
+    else:
+        arguments["task_state"] = task_state.model_dump(exclude_unset=True)
+    return await invoke("act", arguments)
 
 
 @server.tool()

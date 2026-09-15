@@ -12,6 +12,13 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 object SpeechModels {
+    const val EMBEDDED_NAME = "paraformer-zh-small-int8-2024-03-09"
+    const val EMBEDDED_BYTES = 81904027L
+    fun embeddedAvailable(context: Context): Boolean = runCatching {
+        context.assets.openFd("asr/model.int8.onnx").use { it.length == 81828675L } &&
+            context.assets.open("asr/tokens.txt").use { it.read() >= 0 }
+    }.getOrDefault(false)
+    // Legacy Vosk installer retained for the old public LocalDictation API only.
     const val NAME = "vosk-model-small-cn-0.22"
     const val URL = "https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip"
     const val SHA256 = "3af8b0e7e0f835ae9d414ce5df580237a3cfb08d586c9fbbb0f7ff29ad5b14ba"

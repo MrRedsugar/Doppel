@@ -1,18 +1,48 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <queries><intent><action android:name="android.speech.RecognitionService" /></intent><intent><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent></queries>
+    <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <queries><intent><action android:name="android.speech.tts.engine.TTS_SERVICE" /></intent><intent><action android:name="android.speech.RecognitionService" /></intent><intent><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent></queries>
     <application>
         <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.documents" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/document_paths" /></provider>
-        <activity android:name=".VoiceActivity" android:exported="false" android:taskAffinity="${applicationId}.voice" android:excludeFromRecents="true" android:theme="@android:style/Theme.Material.Light.Dialog.NoActionBar" />
+        <activity android:name=".VoiceActivity" android:exported="false" android:taskAffinity="${applicationId}.voice" android:excludeFromRecents="true" android:theme="@style/DoppelGlassDialog" />
+        <activity android:name=".TaskPanelActivity" android:exported="false" android:taskAffinity="${applicationId}.companion" android:excludeFromRecents="true" android:theme="@style/DoppelGlassDialog" />
         <activity android:name=".SpeechSettingsActivity" android:exported="false" />
+        <activity android:name=".ClipboardReadActivity" android:exported="false" android:excludeFromRecents="true" android:taskAffinity="${applicationId}.clipboard" android:theme="@android:style/Theme.Material.NoActionBar" />
+        <activity android:name=".PermissionSetupActivity" android:exported="false" android:configChanges="orientation|screenSize|keyboardHidden" />
+        <activity android:name=".AppearanceActivity" android:exported="false" />
+        <activity android:name=".GuiGroundingSettingsActivity" android:exported="false" />
+        <activity android:name=".LegacyScreenCaptureActivity" android:exported="false" android:excludeFromRecents="true" />
+        <activity android:name=".ScheduleActivity" android:exported="false" />
+        <activity android:name=".AutomaticTaskConflictActivity" android:exported="false" android:excludeFromRecents="true" android:taskAffinity="${applicationId}.automatic_conflict" android:theme="@style/DoppelGlassDialog" />
+        <activity android:name=".AutomaticUnlockSettingsActivity" android:exported="false" android:excludeFromRecents="true" />
+        <activity android:name=".AutomaticUnlockWakeActivity" android:exported="false" android:excludeFromRecents="true" android:taskAffinity="${applicationId}.automatic_unlock" android:configChanges="orientation|screenSize|keyboardHidden" android:theme="@android:style/Theme.Material.NoActionBar" />
+        <activity android:name=".OnboardingActivity" android:exported="false" />
+        <activity android:name=".LegalActivity" android:exported="false" />
+        <activity android:name=".ExtensionSettingsActivity" android:exported="false" />
+        <activity android:name=".AutoTriggerSettingsActivity" android:exported="false" />
+        <activity android:name=".ControlPickerSnapshotActivity" android:exported="false" android:excludeFromRecents="true" />
+        <activity android:name=".DeveloperConnectionActivity" android:exported="false" android:excludeFromRecents="true" />
+        <activity android:name=".ModelSettingsActivity" android:exported="false" android:excludeFromRecents="true" />
         <activity android:name=".LoginSettingsActivity" android:exported="false" />
-        <service android:name=".LoginNotificationService" android:label="Doppel 登录验证码" android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" android:exported="true">
+        <activity android:name=".PasswordSettingsActivity" android:exported="false" />
+        <activity android:name=".PaymentSettingsActivity" android:exported="false" android:excludeFromRecents="true" />
+        <service android:name=".LoginNotificationService" android:label="Doppel 通知与登录验证码" android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" android:exported="true">
             <intent-filter><action android:name="android.service.notification.NotificationListenerService" /></intent-filter>
+        </service>
+        <service android:name=".ShellBridgeImeService" android:label="Doppel 任务输入法" android:permission="android.permission.BIND_INPUT_METHOD" android:exported="true">
+            <intent-filter><action android:name="android.view.InputMethod" /></intent-filter>
+            <meta-data android:name="android.view.im" android:resource="@xml/shell_bridge_ime" />
         </service>
         <service android:name=".DoppelAccessibilityService" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE" android:exported="true" android:label="Doppel 屏幕操作">
             <intent-filter><action android:name="android.accessibilityservice.AccessibilityService" /></intent-filter>
@@ -21,5 +51,16 @@
         <service android:name=".DeviceWorkerService" android:exported="false" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="User initiated visible assistive device command session with persistent pause control" />
         </service>
+        <service android:name=".ScheduleJobService" android:exported="true" android:permission="android.permission.BIND_JOB_SERVICE" />
+        <!-- Voice/companion sheets remove their own tasks; sharing has an explicit notification stop control. -->
+        <service android:name=".LegacyScreenCaptureService" android:exported="false" android:foregroundServiceType="mediaProjection" />
+        <receiver android:name=".ScheduleBootReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

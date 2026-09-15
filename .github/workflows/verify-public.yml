@@ -47,6 +47,13 @@ jobs:
       - uses: android-actions/setup-android@v3
       - name: Install Android SDK Components
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare Pinned Chinese Speech Assets
+        run: |
+          python scripts/prepare-embedded-tts.py --download
+          python scripts/prepare-embedded-asr.py --download
       - name: Build Public Android Modules
         working-directory: android
         run: |
