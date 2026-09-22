@@ -8,7 +8,7 @@ import org.junit.Test
 class SplitAdditiveStateNormalizationTest {
     private val additive = listOf("facts", "completed_steps", "failed_routes")
     private fun tap() = JSONObject().put("kind", "tap").put("target", "保存按钮")
-        .put("expected", "出现保存成功提示").put("screen_context", "编辑页面")
+        .put("expected", "出现保存成功提示").put("screen_context", "编辑页面").put("request_login_code", JSONObject.NULL)
     private fun state() = JSONObject().put("phase", "编辑").put("facts", JSONArray())
         .put("completed_steps", JSONArray()).put("failed_routes", JSONArray()).put("remaining_steps", JSONArray().put("保存"))
     private fun wrapped(memory: Any, decision: JSONObject = tap()) = JSONObject().put("decision", decision).put("state", memory)

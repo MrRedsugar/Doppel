@@ -110,7 +110,7 @@ class OptionalGroundingTest {
     }
     @Test fun legacyTasksKeepABWhenTheSettingHasSinceChanged() {
         var saved="";val original=engine(true,{saved=it});val id=start(original)
-        val rows=JSONArray(saved);rows.getJSONObject(0).remove("execution_mode")
+        val rows=SplitTaskEngine.readPersistedRuns(saved);rows.getJSONObject(0).remove("execution_mode")
         val restored=SplitTaskEngine(rows.toString(),{}, {1000L},enhancementEnabled={false})
         restored.control(id,"resume",JSONObject());capture(restored,"restart")
         restored.accept(restored.takeWork()!!,reply(decision().apply {remove("points")}));capture(restored,"fresh")

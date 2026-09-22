@@ -12,6 +12,7 @@
 **/.pytest_cache/
 **/*.egg-info/
 **/.gradle/
+**/.kotlin/
 **/build/
 **/local.properties
 **/*.jks
@@ -22,3 +23,4 @@ dist/
 exports/
 node_modules/
 *.log
+android/sdk/libs/poi-android-5.5.1.jar

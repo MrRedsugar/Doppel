@@ -15,6 +15,7 @@ import time
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .errors import Conflict, NotFound
+from . import submission
 
 TERMINAL = {"completed", "failed", "cancelled"}
 MAX_MS = 253402214400000  # Keep arithmetic/serialization within datetime's domain.
@@ -160,8 +161,14 @@ class Scheduler:
                 interrupted = False
                 for entry in job["history"]:
                     if entry["status"] == "dispatching":
-                        entry.update(status="uncertain", reason="host_restarted_during_dispatch")
-                        interrupted = True
+                        row=self.runtime.store.one("SELECT run_id FROM run_submissions WHERE owner=? AND device_id=? AND request_id=?",
+                            (owner,job["device_id"],entry.get("request_id") or f"schedule:{job['id']}:{entry['scheduled_at_ms']}"))
+                        if row:
+                            entry.update(status="queued",run_id=row["run_id"])
+                            self._save(owner,job)
+                        else:
+                            entry.update(status="uncertain", reason="host_restarted_during_dispatch")
+                            interrupted = True
                 if interrupted:
                     job.update(enabled=False, next_due_ms=None, waiting_reason="review_uncertain_dispatch")
                     self._save(owner, job)
@@ -241,17 +248,25 @@ class Scheduler:
                     # Storage may have failed after creation while this process stayed alive.
                     for entry in job["history"]:
                         if entry["status"] == "dispatching":
-                            entry.update(status="uncertain", reason="dispatch_unconfirmed")
-                    job.update(enabled=False, next_due_ms=None, waiting_reason="review_uncertain_dispatch")
+                            row=self.runtime.store.one("SELECT run_id FROM run_submissions WHERE owner=? AND device_id=? AND request_id=?",
+                                (owner,job["device_id"],entry.get("request_id") or f"schedule:{job['id']}:{entry['scheduled_at_ms']}"))
+                            if row:
+                                entry.update(status="queued",run_id=row["run_id"])
+                            else:
+                                entry.update(status="uncertain", reason="dispatch_unconfirmed")
+                                job.update(enabled=False, next_due_ms=None, waiting_reason="review_uncertain_dispatch")
                     self._save(owner, job)
                     continue
                 changed = False
                 for entry in job["history"]:
-                    if entry["status"] == "started" and entry.get("run_id"):
+                    if entry["status"] in {"queued", "started"} and entry.get("run_id"):
                         try:
                             status = self.runtime.get_run(owner, entry["run_id"]).status
                             if status in TERMINAL:
                                 entry.update(status=status, finished_at_ms=now)
+                                changed = True
+                            elif status != "queued" and entry["status"] == "queued":
+                                entry.update(status="started")
                                 changed = True
                         except NotFound:
                             entry.update(status="unavailable", reason="run_history_removed")
@@ -261,15 +276,10 @@ class Scheduler:
                     if changed:
                         self._save(owner, job)
                     continue
-                if now - due <= GRACE_MS:
-                    rows = self.runtime.store.all("SELECT payload FROM runs WHERE device_id=?", (job["device_id"],))
-                    reason = "device_busy" if any(json.loads(row["payload"])["status"] not in TERMINAL for row in rows) else self.readiness(owner, job["device_id"])
-                    if reason:
-                        job["waiting_reason"] = reason
-                        self._save(owner, job)
-                        continue
                 missed = now - due > GRACE_MS
                 entry = {"scheduled_at_ms": due, "at_ms": now, "status": "missed" if missed else "dispatching", "run_id": None}
+                if not missed:
+                    entry["request_id"] = submission.create(due, f"schedule:{job['id']}")
                 job["history"] = (job["history"] + [entry])[-100:]
                 job["waiting_reason"] = None
                 job["next_due_ms"] = ScheduleRule(**job["rule"]).next_after(now)
@@ -281,16 +291,13 @@ class Scheduler:
                     # Scheduled work is an execution record only. It must not
                     # advance or create the user's conversational thread.
                     run = self.runtime.create_run(owner, job["device_id"], job["goal"], job["mode"], job["allowed_packages"],
-                                                  conversation_enabled=False, source="schedule")
-                    entry.update(status="started", run_id=run.id)
+                                                  conversation_enabled=False, source="schedule",
+                                                  request_id=entry["request_id"],
+                                                  source_metadata={"rule_id":job["id"],"source_label":"定时任务","scheduled_at_ms":due})
+                    entry.update(status="queued", run_id=run.id)
                     self._save(owner, job)
                     with self.runtime.store.transaction() as db:
                         self.runtime.store.event(db, run.id, "schedule", "Created by schedule", {"schedule_id": job["id"], "scheduled_at_ms": due})
-                    if self.runtime.config.auto_start:
-                        self.runtime.start_run(run.id)
-                except Conflict:
-                    entry.update(status="skipped", reason="device_busy")
-                    self._save(owner, job)
                 except Exception:
                     # An unknown create/start outcome is not proof that no side effect happened.
                     entry.update(status="uncertain", reason="dispatch_unconfirmed")

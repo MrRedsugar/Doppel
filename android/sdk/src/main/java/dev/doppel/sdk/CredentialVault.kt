@@ -77,46 +77,64 @@ class CredentialVault(context: Context) {
     private fun readEntries(): List<Entry> = read().optJSONArray("entries")?.let { rows ->
         (0 until rows.length()).mapNotNull { i -> rows.optJSONObject(i)?.let { row -> Entry(row.optString("id"), row.optString("package"), row.optString("label"), row.optString("username"), row.optString("password"), row.optBoolean("allow_tasks", false)) } }
     } ?: emptyList()
-    /** Only names of explicitly authorized entries leave the vault, never usernames or passwords. */
+    /** Migration metadata only; usernames and passwords never leave this store. */
+    internal fun configuredApplications(): Map<String, Boolean> = readEntries().groupBy { it.packageName }
+        .mapValues { (_, entries) -> entries.any { it.allowTasks } }
+    /** Only labels and field availability leave the vault, never usernames or passwords. */
     internal fun taskLabels(packageName: String): JSONArray = runCatching {
         val entries = readEntries().filter { it.packageName == packageName }
         // Restore local redaction after process recreation, before reading a still-filled app field.
-        entries.forEach { LoginAssist.protectPassword(it.password) }
-        JSONArray(entries.filter { it.allowTasks }.groupBy { it.label }
-            .filterValues { it.size == 1 }.keys.map { JSONObject().put("package_name", packageName).put("credential_label", it) })
+        entries.forEach { LoginAssist.protectPassword(it.username); LoginAssist.protectPassword(it.password) }
+        val profile = LoginAssist(app).profileFor(packageName)
+            ?.takeIf { it.enabled && it.method == "password" } ?: return@runCatching JSONArray()
+        JSONArray(entries.filter { it.allowTasks && (profile.credentialId.isBlank() || it.id == profile.credentialId) }.groupBy { it.label }
+            .filterValues { it.size == 1 }.map { (label, rows) -> JSONObject().put("package_name", packageName)
+                .put("credential_label", label).put("has_username", rows.single().username.isNotEmpty())
+                .put("has_password", rows.single().password.isNotEmpty()) })
     }.getOrElse { JSONArray() }
     /** Management remains PIN-locked. A running host task may fill only an explicitly authorized native field. */
     internal fun fillForTask(packageName: String, label: String, node: android.view.accessibility.AccessibilityNodeInfo,
-                             authorized: () -> Boolean): Boolean = runCatching {
+                             authorized: () -> Boolean): Boolean = fillForTask(packageName, label, node, "password", authorized)
+
+    internal fun fillForTask(packageName: String, label: String, node: android.view.accessibility.AccessibilityNodeInfo,
+                             field: String, authorized: () -> Boolean): Boolean = runCatching {
+        if (field != "username" && field != "password") return@runCatching false
+        val login = LoginAssist(app)
+        val profile = login.profileFor(packageName)?.takeIf { it.enabled && it.method == "password" } ?: return@runCatching false
         val keyguard = app.getSystemService(android.app.KeyguardManager::class.java)
         fun validTarget() = authorized() && !keyguard.isDeviceLocked && !keyguard.isKeyguardLocked &&
+            login.profileFor(packageName) == profile &&
             packageName != app.packageName && node.refresh() && node.packageName?.toString() == packageName &&
-            node.isVisibleToUser && node.isEnabled && node.isEditable && node.isPassword &&
+            node.isVisibleToUser && node.isEnabled && node.isEditable &&
+            (if (field == "username") node.isFocused && !node.isPassword else node.isPassword) &&
             !Policy.manualFinancial("${node.hintText?.toString().orEmpty()} ${node.contentDescription?.toString().orEmpty()} ${node.viewIdResourceName.orEmpty()}")
         if (!hasPin() || !validTarget()) return@runCatching false
-        val matches = readEntries().filter { it.allowTasks && it.packageName == packageName && (label.isBlank() || it.label == label) }
+        val matches = readEntries().filter { it.allowTasks && it.packageName == packageName &&
+            (profile.credentialId.isBlank() || it.id == profile.credentialId) && (label.isBlank() || it.label == label) }
         val entry = matches.singleOrNull() ?: return@runCatching false
-        if (!validTarget()) return@runCatching false
+        val value = if (field == "username") entry.username else entry.password
+        if (value.isEmpty() || !validTarget()) return@runCatching false
         // Register before dispatch: the target can publish a text event immediately, even on a failed receipt.
-        LoginAssist.protectPassword(entry.password)
+        LoginAssist.protectPassword(value)
         node.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, android.os.Bundle().apply {
-            putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, entry.password)
+            putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value)
         })
     }.getOrDefault(false)
 
-    fun save(entry: Entry) {
+    fun save(entry: Entry): String {
         requireUnlocked(); require(entry.packageName.matches(Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)+"))) { "应用包名不正确" }
         require(entry.label.trim().length in 1..80) { "请输入名称" }; require(entry.username.length <= 256 && entry.password.length in 1..512) { "账号或密码格式不正确" }
         val id = entry.id.ifBlank { java.util.UUID.randomUUID().toString() }
         val rows = JSONArray(); entries().filter { it.id != id }.forEach { rows.put(json(it)) }; rows.put(json(entry.copy(id = id)))
         require(rows.length() <= 100) { "保存数量已达到上限" }; write(JSONObject().put("entries", rows))
+        return id
     }
     fun remove(id: String) { requireUnlocked(); val rows = JSONArray(); entries().filter { it.id != id }.forEach { rows.put(json(it)) }; write(JSONObject().put("entries", rows)) }
     fun valueFor(packageName: String, label: String? = null): Entry? {
         requireUnlocked(); return entries().firstOrNull { it.packageName == packageName && (label.isNullOrBlank() || it.label == label) }
     }
 
-    private fun requireUnlocked() { check(isUnlocked()) { "请先解锁密码管理" } }
+    private fun requireUnlocked() { check(isUnlocked()) { "请先解锁登录设置" } }
     private fun validatePin(pin: String) { require(pin.matches(Regex("[0-9]{4}"))) { "PIN 必须是 4 位数字" } }
     private fun json(e: Entry) = JSONObject().put("id", e.id).put("package", e.packageName).put("label", e.label.trim()).put("username", e.username).put("password", e.password).put("allow_tasks", e.allowTasks)
     private fun read(): JSONObject {

@@ -10,11 +10,20 @@ from doppel.models import CommandResult, Node, Observation
 from test_completion import call, observe, setup
 
 
-def test_empty_skill_catalog_is_available_without_precreated_directory(tmp_path):
+def test_retired_skills_are_unavailable_and_existing_files_stay(tmp_path):
     runtime, device, run, client = setup(tmp_path)
-    response = call(client, run, "list_skills")
-    assert response.status_code == 200
-    assert response.json() == {"items": []}
+    from doppel.model_proxy import TOOL_NAMES
+    old = tmp_path / "skills" / "guide" / "SKILL.md"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b"existing user data")
+    for name in ("list_skills", "read_skill", "load_skill", "read_skill_resource"):
+        assert name not in TOOL_NAMES
+        response = client.post(f"/v1/internal/runs/{run.id}/tool", json={"name": name, "arguments": {"name": "guide"}})
+        assert response.status_code == 422
+        assert response.json()["detail"] == "Unknown tool"
+    for method, path in (("get", "/skills"), ("get", "/skills/guide"), ("post", "/skills/import"), ("delete", "/skills/guide")):
+        assert getattr(client, method)("/v1" + path).status_code == 404
+    assert old.read_bytes() == b"existing user data"
 
 
 def workbook(runtime):
@@ -67,11 +76,11 @@ def test_three_identical_failed_tool_calls_stop_before_another_model_charge(tmp_
 
 def test_changed_arguments_or_success_reset_repeated_failure_guard(tmp_path):
     runtime, device, run, client = setup(tmp_path)
-    for name in ("missing", "different", "missing", "missing"):
-        assert client.post(f"/v1/internal/runs/{run.id}/tool", json={"name": "read_skill", "arguments": {"name": name}}).json()["status"] == "error"
+    for name in ("missing.xlsx", "different.xlsx", "missing.xlsx", "missing.xlsx"):
+        assert client.post(f"/v1/internal/runs/{run.id}/tool", json={"name": "inspect_document", "arguments": {"name": name}}).json()["status"] == "error"
     assert runtime.get_run("alice", run.id).status == "running"
-    assert call(client, run, "list_skills").status_code == 200
-    assert client.post(f"/v1/internal/runs/{run.id}/tool", json={"name": "read_skill", "arguments": {"name": "missing"}}).json()["status"] == "error"
+    assert call(client, run, "list_documents").status_code == 200
+    assert client.post(f"/v1/internal/runs/{run.id}/tool", json={"name": "inspect_document", "arguments": {"name": "missing.xlsx"}}).json()["status"] == "error"
     assert runtime.get_run("alice", run.id).status == "running"
 
 

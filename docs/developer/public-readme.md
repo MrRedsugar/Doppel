@@ -12,6 +12,11 @@ with it disabled, A returns action coordinates directly. Phone-local orchestrati
 requires network access to the configured model APIs, but no always-on computer
 or self-hosted kernel service. It does not run hosted MCP tools or workbook batching.
 
+Phone-local use is BYOK: users supply their own model API credentials, encrypted
+on the device with Android Keystore. Selected task text, screenshots and requested
+reference excerpts are sent to those providers; local orchestration is not an
+offline model and does not include a first-party model service or API quota.
+
 Verification is version-specific. Historical test counts and real-app measurements
 below belong to their named snapshots, not the current version; consult the
 corresponding version's verification records for its results. See
@@ -31,18 +36,28 @@ a public SDK API, without a current Split caller. These retained types do not
 reactivate the old engine. The old MiMo/Artemis experiments and `continuous_agent` /
 `feedback_operator` switches are not current runtime setup instructions.
 
-Current Skills are bundled or explicitly imported packages. The app has no
-application-learning entry and current tasks do not accumulate or read the former
-learned/manual libraries. Legacy files and explicit SDK inspection/export remain
-available for compatibility; see [Skills](docs/developer/direct-skills.md) and
-[Legacy Learning Data](docs/developer/app-learning.md). The Android host also
-retains its shared themes, task overlays, Chinese speech fallback and device/window
-capability reporting. See the [Android interface guide](docs/developer/android.md).
+Skills and application learning are no longer runtime features. Conversations
+retain task context and message revisions; reusable user corrections and
+preferences can become local long-term memory, editable in Settings. Memory is
+reference context, not permission to change the user's task or bypass approval.
+Imported images and documents, public web search, webpage excerpts and viewport
+screenshots are available through bounded, on-demand tools. A reference alone
+does not preload a whole document into the model context. Android renders pages
+locally with WebView and the reused Jina Reader/Readability core; PDF/Office text
+uses PDFBox/POI. The APK needs no Docker or hosted Jina service. See
+[Public Web Research](docs/developer/web-research.md) for supported operations and
+limits, and the [Android interface guide](docs/developer/android.md) for setup.
 
 ## Optional standalone gateway
 
 The following commands start the optional standalone gateway on port 8765.
 Phone direct mode does not require this service.
+
+The SDK also retains an optional `dev.doppel.sdk.cloud` account/connection client
+for host integrations. It requires an explicitly configured compatible backend;
+this source export contains no private account/credit server, service credentials
+or hosted deployment. That client is separate from both local BYOK and the public
+standalone gateway below.
 
 ```sh
 python -m pip install -e './framework[test]'
@@ -63,16 +78,23 @@ is explicitly disabled, outputs remain bounded, and task completion still
 requires validated evidence even when MiMo chooses ordinary text over a tool.
 Provider configuration is documented in [Standalone Setup](docs/developer/standalone.md).
 
-Build Android with JDK 17+, Android SDK 35 and the included Gradle wrapper:
+Build Android with JDK 21, Android SDK 35 and the included Gradle wrapper:
 
 ```sh
+python scripts/prepare-android-office-parser.py
 python scripts/prepare-embedded-tts.py --download
 python scripts/prepare-embedded-asr.py --download
 cd android
 ./gradlew :sdk:testDebugUnitTest :developer-app:assembleDebug :test-app:assembleDebug
 ```
 
-The preparation commands download pinned TTS and ASR archives and verify their
+The Office preparation command rebuilds the pinned upstream Android POI adapter
+and verifies its fixed source and jar SHA-256 values. The generated 22 MB jar is
+not committed; preserve its provenance and license assets. See
+[Office Parser Build](android/sdk/libs/README.md). JDK and Gradle installation
+paths are not tied to the original development machine.
+
+Speech preparation downloads pinned TTS and ASR archives and verifies their
 SHA-256 values. Subsequent Gradle builds prepare both embedded Chinese speech
 asset sets from those local archives without downloading them again. The source
 export excludes model weights; built SDK/client artifacts include the TTS fallback

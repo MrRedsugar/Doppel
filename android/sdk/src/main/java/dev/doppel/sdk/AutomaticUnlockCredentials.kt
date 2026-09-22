@@ -42,6 +42,18 @@ internal object AutomaticUnlockCredentials {
 
     @Synchronized fun isEnabled(context: Context): Boolean = hasSaved(context) && !isSuspended(context)
 
+    fun isLanHandoffEnabled(context: Context): Boolean = state(context).getBoolean("lan_handoff", false)
+
+    /** Enabling is called only after fresh system credential authentication in settings. */
+    @Synchronized fun setLanHandoffEnabled(context: Context, enabled: Boolean) {
+        if (enabled) { requireUnlocked(context); check(isEnabled(context)) { "请先启用自动解锁" } }
+        val prefs = state(context)
+        if (!prefs.edit().putBoolean("lan_handoff", enabled).commit()) {
+            prefs.edit().putBoolean("lan_handoff", false).commit()
+            error("未能保存免密码接管设置")
+        }
+    }
+
     /** Failure disables further automatic attempts without destroying the owner's saved password. */
     @Synchronized fun suspend(context: Context) {
         check(state(context).edit().putBoolean("suspended", true).commit()) { "无法保存自动解锁停用状态" }
@@ -139,7 +151,7 @@ internal object AutomaticUnlockCredentials {
         check(!AutomaticUnlockSession.active) { "请先结束自动任务再删除密码" }
         // Delete the key as well: residual filesystem blocks cannot decrypt the old credential.
         try { store().deleteEntry(alias(context)) } finally { file(context).delete() }
-        check(state(context).edit().remove("suspended").remove("attempt").remove("protected").commit()) { "无法清除自动解锁设置" }
+        check(state(context).edit().remove("suspended").remove("attempt").remove("protected").remove("lan_handoff").commit()) { "无法清除自动解锁设置" }
         clearFailureNotice(context)
     }
 

@@ -141,7 +141,7 @@ class VoiceActivity : Activity() {
             header.addView(UiTheme.icon(this, UiIcons.history, "当前任务") { openCurrentTask(keyboardValue()) }, LinearLayout.LayoutParams(dp(44), dp(44)))
         }
         header.addView(UiTheme.icon(this, UiIcons.close, "关闭") { finishVoice() }, LinearLayout.LayoutParams(dp(44), dp(44))); layout.addView(header)
-        status = UiTheme.text(this, if (gateway.prefs.getString("active_run", "").isNullOrBlank()) "说出你的想法，或直接输入" else "当前任务已保留，新任务开始前会请你选择", 13f, UiTheme.muted).apply { setPadding(0, dp(2), 0, dp(16)) }.also { layout.addView(it) }
+        status = UiTheme.text(this, if (gateway.prefs.getString("active_run", "").isNullOrBlank()) "说出你的想法，或直接输入" else "新任务将加入队列，当前任务继续执行", 13f, UiTheme.muted).apply { setPadding(0, dp(2), 0, dp(16)) }.also { layout.addView(it) }
         val editor = UiTheme.field(this, "输入任务").apply {
             val landscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
             minLines = if (landscape) 1 else 3; maxLines = if (landscape) 3 else 6
@@ -220,12 +220,6 @@ class VoiceActivity : Activity() {
     private fun submitHold(value: String) {
         if (!FirstUseConsent.allowEntry(this)) return
         if (submitted || closingHold || !visible || isFinishing) return
-        if (!gateway.prefs.getString("active_run", "").isNullOrBlank()) {
-            keyboardDraft = value; holdMode = false; entryRevision++
-            stopRecognition(true); detachGesture(); keyboardPending = false; renderSurface()
-            chooseNewTask(value)
-            return
-        }
         try { gateway.prepareUserConnection() }
         catch (error: Exception) { failHoldSubmission(value, ConversationIntent.failureMessage(error) + "，语音已保留为草稿"); return }
         if (DoppelAccessibilityService.instance == null) {
@@ -258,9 +252,6 @@ class VoiceActivity : Activity() {
         if (submitted || taskCreation.get()) return
         val value = keyboardValue().trim()
         if (value.isBlank()) { showStatus("请说出或输入任务"); return }
-        if (!gateway.prefs.getString("active_run", "").isNullOrBlank()) {
-            chooseNewTask(value); return
-        }
         val device = try { gateway.prepareUserConnection() } catch (error: Exception) {
             gateway.prefs.edit().putString("draft_goal", value).apply()
             showStatus(ConversationIntent.failureMessage(error)); return
@@ -268,35 +259,35 @@ class VoiceActivity : Activity() {
         if (DoppelAccessibilityService.instance == null) { showStatus("请先启用无障碍服务"); return }
         if (!taskCreation.compareAndSet(false, true)) return
         val creationGeneration = TaskControl.currentGeneration()
+        val connection = gateway.captureReviewConnection()
         submitted = true
+        gateway.prefs.edit().putString("draft_goal", value).commit()
         stopRecognition(true); detachGesture(); confirm?.isEnabled = false; showStatus("正在创建任务")
         val mode = listOf("ask", "assist", "full")[gateway.prefs.getInt("mode_index", 1).coerceIn(0, 2)]
         io.execute {
             try {
-                val run = gateway.createConversationRun(JSONObject().put("device_id", device).put("goal", value).put("mode", mode))
-                synchronized(gateway.prefs) {
-                    gateway.prefs.edit().putString("active_run", run.getString("id"))
-                        .putString("voice_pending_worker_run", run.getString("id")).putLong("voice_pending_worker_generation", creationGeneration)
-                        .putString("draft_goal", "").commit()
+                val run = gateway.createConversationRun(JSONObject().put("device_id", device).put("goal", value).put("mode", mode), connection)
+                TaskControl.reconcileCreatedRun(this, run, creationGeneration, connection) { reconciled, error ->
+                    taskCreation.set(false)
+                    if (connection.scope != gateway.reviewScope()) return@reconcileCreatedRun
+                    if (reconciled != null) {
+                        if (gateway.prefs.getString("draft_goal", "").orEmpty().trim() == value) gateway.prefs.edit().remove("draft_goal").commit()
+                        runCatching { TaskControl.wakeQueue(this) }
+                        resumedVoice.get()?.takeIf { it.keyboardValue().trim() == value }?.let { screen ->
+                            Toast.makeText(screen, if (reconciled.optString("status") == "queued") TaskPresentation.queueLabel(reconciled) else "任务已创建", Toast.LENGTH_SHORT).show()
+                            screen.finishVoice()
+                        }
+                    } else resumedVoice.get()?.let { screen ->
+                        screen.submitted = false; screen.showStatus(error ?: "创建未确认，草稿已保留"); screen.confirm?.isEnabled = true
+                    }
                 }
-                runOnUiThread { resumedVoice.get()?.startCreatedWorker() }
-            } catch (_: Exception) { runOnUiThread {
+
+            } catch (_: Exception) { taskCreation.set(false); runOnUiThread {
+                if (connection.scope != gateway.reviewScope()) return@runOnUiThread
                 resumedVoice.get()?.takeIf { !it.holdMode }?.let {
                     it.submitted = false; it.showStatus("任务未创建，请检查连接后重试"); it.confirm?.isEnabled = true
                 }
             } }
-            finally { taskCreation.set(false) }
-        }
-    }
-
-    private fun chooseNewTask(value: String) {
-        stopRecognition(true)
-        NewTaskEntry.open(this, gateway, value, onKeep = {
-            if (visible && !isFinishing && !isDestroyed) openCurrentTask(value)
-        }) {
-            if (visible && !isFinishing && !isDestroyed) {
-                keyboardDraft = value; text?.setText(value); submitTask()
-            }
         }
     }
 
@@ -327,7 +318,7 @@ class VoiceActivity : Activity() {
                 when (run?.takeIf { it.optString("id") == id }?.optString("status")) {
                     "running" -> try {
                         if (current != id) { showStatus("任务状态已更新，请查看任务"); return@runOnUiThread }
-                        if (!TaskControl.startWorker(this, generation)) return@runOnUiThread
+                        if (!TaskControl.wakeQueue(this, generation)) return@runOnUiThread
                         gateway.prefs.edit().remove("voice_pending_worker_run").remove("voice_pending_worker_generation").commit()
                         finishVoice()
                     } catch (_: Exception) { showStatus("任务已创建，请返回任务页继续") }
@@ -336,8 +327,10 @@ class VoiceActivity : Activity() {
                         finishVoice()
                     }
                     "queued" -> {
-                        showStatus("任务已创建，排队中")
-                        handler.postDelayed({ startCreatedWorker() }, 1500)
+                        gateway.prefs.edit().remove("voice_pending_worker_run").remove("voice_pending_worker_generation").commit()
+                        TaskControl.wakeQueue(this, generation)
+                        Toast.makeText(this, TaskPresentation.queueLabel(requireNotNull(run)), Toast.LENGTH_SHORT).show()
+                        finishVoice()
                     }
                     else -> showStatus("任务已创建，请返回任务页继续")
                 }

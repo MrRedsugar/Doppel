@@ -6,7 +6,6 @@ import android.os.Bundle
 import android.os.SystemClock
 import androidx.test.platform.app.InstrumentationRegistry
 import dev.doppel.sdk.AndroidWebResearch
-import dev.doppel.sdk.DirectSkills
 import dev.doppel.sdk.ModelApi
 import dev.doppel.sdk.ModelProviders
 import org.json.JSONArray
@@ -120,9 +119,8 @@ class PcAgentBridgeTest {
 /** Reflection only crosses Kotlin's module boundary; all model/state behavior remains in SDK. */
 private class PcBridgeRuntime(context: Context, private val folder: File, private val allowModel: Boolean) {
     private val sdk = Class.forName("dev.doppel.sdk.SplitTaskEngine", true, ModelApi::class.java.classLoader)
-    private val skills = DirectSkills(context)
     private val model = ModelApi(context)
-    private val web = AndroidWebResearch()
+    private val web = AndroidWebResearch(context)
     private val guiClass = Class.forName("dev.doppel.sdk.GuiGroundingClient", true, ModelApi::class.java.classLoader)
     private val gui = guiClass.getConstructor(Context::class.java).newInstance(context)
     private val connection = AtomicReference<HttpURLConnection?>()
@@ -132,11 +130,10 @@ private class PcBridgeRuntime(context: Context, private val folder: File, privat
     private val providers = ModelProviders(context)
     private val probe = AtomicReference<JSONObject?>()
     private var id: String? = null
-    private fun newEngine(saveTo: File, enhanced: Boolean? = null, clock: () -> Long = System::currentTimeMillis): Any = sdk.constructors.single { it.parameterCount == 6 }.newInstance(null,
-        { text: String -> saveTo.writeText(text) },
-        clock, { skills.list() },
-        { goal: String, pkg: String, phase: String -> skills.relevant(goal, pkg, phase) },
-        { enhanced ?: providers.routing().enhancementEnabled })
+    private fun newEngine(saveTo: File, enhanced: Boolean? = null, clock: () -> Long = System::currentTimeMillis): Any = sdk.constructors.single { it.parameterCount == 5 }.newInstance(null,
+        { text: String -> saveTo.writeText(text) }, clock,
+        { enhanced ?: providers.routing().enhancementEnabled },
+        { _: String -> JSONObject().put("items", org.json.JSONArray()) })
     private val engine = newEngine(File(folder, "engine.json"))
 
     private fun invokeEngine(target: Any, name: String, vararg args: Any?): Any? = try {
@@ -333,9 +330,6 @@ private class PcBridgeRuntime(context: Context, private val folder: File, privat
                     if (local != null) {
                         try {
                             val result = when (local) {
-                                "list_skills" -> skills.list(payload.optString("query"), payload.optInt("offset", 0), payload.optInt("limit", 20))
-                                "load_skill" -> skills.read(payload.getString("name"), payload.optString("revision").ifBlank { null }, payload.optInt("offset", 0), payload.optInt("max_chars", 4500))
-                                "read_skill_resource" -> skills.resource(payload.getString("name"), payload.getString("path"), payload.optString("revision").ifBlank { null }, payload.optInt("offset", 0), payload.optInt("max_chars", 4500))
                                 "search_web" -> web.search(payload.getString("query")) { call("isCurrent", work) == true }
                                 "read_web" -> web.read(payload.getString("url")) { call("isCurrent", work) == true }
                                 "locate_ui" -> guiClass.methods.single { it.name == "locate" && it.parameterCount == 2 }

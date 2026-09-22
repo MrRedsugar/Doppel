@@ -6,6 +6,15 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class TaskPresentationTest {
+    @Test fun queuedTaskShowsOrderWithoutPretendingToPlanOrRun() {
+        val run = JSONObject().put("status", "queued").put("queue_position", 2)
+        assertEquals("排队第 2 位", TaskPresentation.queueLabel(run))
+        assertTrue(TaskPresentation.detail(run, false).contains("前面的任务结束后"))
+        val progress = TaskProgress.presentation(run)
+        assertFalse(progress.running)
+        assertEquals("排队第 2 位", progress.label)
+    }
+
     @Test fun automaticLabelUsesStoredSourceAndRetainsTheActualStatus() {
         for (source in listOf("schedule", "trigger")) {
             val run = JSONObject().put("source", source).put("title", "用户的原标题")

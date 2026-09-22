@@ -51,26 +51,29 @@ scope while preserving payment/manual-takeover checks. External extension mutati
 have their own explicit grants and approval policy. Package scope limits launch
 and interaction; observation/recovery operations remain available as documented.
 
-Screen text, document cells, Skills and provider replies are untrusted task data.
+Screen text, document cells, long-term memory and provider replies are untrusted task data.
 They cannot grant new tools, owners, file roots, permissions or model credentials.
 MCP provider name/annotation checks cannot prove a malicious provider's actual
 behavior; users must trust its implementation and credentials. Delegated payment
 is off by default and can be enabled only through the local Settings risk flow.
-With valid local consent, ask/assist retain operation approval and full may attempt
-an ordinary purchase payment. Credentials, transfers and persistent debit settings
-remain manual. The gateway stamps consent from the device observation; Android
-rechecks the current generation and exact screen, and durably limits attempts to
-one per task/application pair. Model and extension inputs cannot grant consent.
+Only full access plus valid local consent permits an ordinary purchase payment;
+ask/assist still hand payment to the user. A identifies an actual payment from the
+current screenshot and intent and chooses `pay`; B only locates its tap target.
+The Python MCP adapter exposes the same `pay` action. Ordinary navigation remains
+`tap`, without a new `safety` field. Host/device code does not infer payment from
+labels or page text. Credentials, transfers and persistent debit settings remain
+manual. The gateway supplies the stored task mode and observation's consent;
+Android rechecks the current grant and source context and durably limits attempts
+to one per task/application pair. Model and extension inputs cannot grant consent.
 Accepted actions do not establish a charge; subsequent payment/order evidence is
-required. Conservative keyword/context checks are not a complete classifier for
-every unlabeled interface. See [Delegated Payment](../developer/payment-delegation.md)
+required. Model judgment is not a guarantee of correct payment recognition.
+See [Delegated Payment](../developer/payment-delegation.md)
 for revocation, storage failure and multi-step checkout limits.
 
 ## Extensions and Documents
 
-Skills load metadata first, then instructions/resources on demand; scripts are
-never automatically executed. Python/Node dependencies remain unverified until
-the host explicitly checks them. Remote Streamable HTTP extension configuration
+Skills catalogs, imports and runtime tools have been removed; existing user files
+are retained. Task corrections use editable long-term memory. Remote Streamable HTTP extension configuration
 is user-authenticated and owner-scoped, with empty grants by default. stdio is
 administrator startup configuration only. Discovered tool schemas are validated
 without remote schema fetching, and deadlines/cancellation are enforced.

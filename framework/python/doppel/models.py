@@ -55,7 +55,7 @@ class Observation(Model):
     payment_consent_id: PaymentConsentId | None = None
 
 
-CommandKind = Literal["observe", "launch", "tap", "long_press", "type", "login_phone", "login_code", "scroll", "back", "home", "recents", "notifications", "quick_settings", "split_screen", "wait", "screenshot", "open_document"]
+CommandKind = Literal["observe", "launch", "tap", "pay", "long_press", "type", "login_phone", "login_code", "scroll", "back", "home", "recents", "notifications", "quick_settings", "split_screen", "wait", "screenshot", "open_document"]
 
 
 class Command(Model):
@@ -71,15 +71,16 @@ class Command(Model):
     include_screenshot: bool = False
     uri: str | None = None
     desired_checked: StrictBool | None = None
+    mode: Literal["ask", "assist", "full"] = "assist"
     payment_consent_id: PaymentConsentId | None = None
 
     @model_validator(mode="after")
     def require_fields(self):
-        if self.payment_consent_id is not None and self.kind != "tap":
-            raise ValueError("payment_consent_id is only supported for tap")
-        if self.desired_checked is not None and self.kind != "tap":
-            raise ValueError("desired_checked is only supported for tap")
-        if self.kind in {"tap", "long_press", "type", "login_phone", "login_code"} and (not self.target or not self.screen_id):
+        if self.payment_consent_id is not None and self.kind not in {"tap", "pay"}:
+            raise ValueError("payment_consent_id is only supported for pay (or legacy tap)")
+        if self.desired_checked is not None and self.kind not in {"tap", "pay"}:
+            raise ValueError("desired_checked is only supported for tap or pay")
+        if self.kind in {"tap", "pay", "long_press", "type", "login_phone", "login_code"} and (not self.target or not self.screen_id):
             raise ValueError("A current screen_id and target are required")
         if self.kind == "type" and self.text is None:
             raise ValueError("text is required")
@@ -156,6 +157,9 @@ class Run(Model):
     status: RunStatus
     message: str = ""
     created_at: str
+    queue_sequence: int = Field(default=0, ge=0)
+    queue_position: int = Field(default=0, ge=0)
+    source_metadata: dict[str, Any] = Field(default_factory=dict)
     parent_run_id: str | None = None
     pending_request: dict[str, Any] | None = None
     requires_fresh_observation: bool = False

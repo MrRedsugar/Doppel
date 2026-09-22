@@ -528,10 +528,10 @@ internal class DirectTaskEngine(
             }
             val text = label(node)
             val credentialInput = nodes().any { it.optBoolean("editable") && (it.optBoolean("password") || Policy.financialCredential(label(it))) }
-            if (node.optBoolean("password") && kind != "login_password" || kind != "scroll" && kind != "login_password" && Policy.manualFinancialContext(labels, credentialInput) && !(kind == "tap" && Policy.leavesFinancialScreen(text))) {
+            if (node.optBoolean("password") && kind != "login_password" || kind != "scroll" && kind != "login_password" && manualFinancialContext(labels, credentialInput) && !(kind == "tap" && leavesFinancialScreen(text))) {
                 pauseManual(run, "敏感输入、支付验证、转账和长期扣款授权需要手动处理"); return
             }
-            payment = kind != "scroll" && Policy.paymentTarget(text, labels)
+            payment = kind != "scroll" && paymentTarget(text, labels)
             if (payment) {
                 val observedConsent = observation?.optString("payment_consent_id")
                 val currentConsent = consent()
@@ -1602,3 +1602,13 @@ internal class DirectTaskEngine(
         }
     }
 }
+
+// Historical classifier retained only for archived engine regression fixtures.
+private fun paymentContext(labels: Iterable<String>) = labels.any { Regex("收银台|应付总额|支付金额|付款金额|待支付|确认付款|确认支付|cashier|checkout|payment|amount due", RegexOption.IGNORE_CASE).containsMatchIn(it) }
+private fun manualFinancialContext(labels: Iterable<String>, credentialInput: Boolean = false) = labels.any { Policy.manualFinancial(it) } || credentialInput && paymentContext(labels)
+private fun leavesFinancialScreen(label: String) = Regex("^(?:返回|取消|关闭)|^(?:back|cancel|close)\\b", RegexOption.IGNORE_CASE).containsMatchIn(label.trim())
+private fun paymentTarget(label: String, screenLabels: Iterable<String>): Boolean {
+        if (Policy.sensitive(label)) return true
+        val ambiguous = label.isBlank() || Regex("^(?:确认|确定|继续|提交|完成)|^(?:confirm|continue|submit|done|ok)\\b", RegexOption.IGNORE_CASE).containsMatchIn(label.trim())
+        return ambiguous && paymentContext(screenLabels)
+    }

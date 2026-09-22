@@ -1,3 +1,5 @@
+@file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+
 package dev.doppel.developer
 
 import android.app.KeyguardManager
@@ -93,7 +95,7 @@ class SettingsSwipeDeviceTest {
         assertFalse(prefs.getBoolean("artemis_mode", false))
         assertTrue(prefs.getString("active_run", "").isNullOrBlank())
         val tasksBefore = bytes("direct-runs-v1.json")
-        val tasks = tasksBefore?.let { JSONArray(String(it, Charsets.UTF_8)) } ?: JSONArray()
+        val tasks = tasksBefore?.let { dev.doppel.sdk.SplitTaskEngine.readPersistedRuns(String(it, Charsets.UTF_8)) } ?: JSONArray()
         assertTrue("Retain unfinished tasks", (0 until tasks.length()).all {
             tasks.getJSONObject(it).optString("status") in setOf("completed", "failed", "cancelled")
         })

@@ -83,9 +83,8 @@ internal data class VisualGesture(
         val combined = labels + label + screenContext
         if (safety == "verification" || Policy.verificationRequired(combined)) return "verification"
         if (sensitiveInput || safety == "sensitive") return "sensitive"
-        // Visual payment never delegates a charge, even if node payment delegation is enabled.
-        if (safety == "payment" || Policy.paymentContext(combined) || Policy.manualFinancialContext(combined) || Policy.sensitive(label) ||
-            Regex("充值|购买|抽卡|寻访|源石兑换|恢复理智|recharge|buy|purchase", RegexOption.IGNORE_CASE).containsMatchIn(label)) return "payment"
+        // Payment intent comes from the model; order/status/wallet labels are not evidence of a charge.
+        if (safety == "payment") return "payment"
         if (safety != "safe") return "uncertain"
         return null
     }

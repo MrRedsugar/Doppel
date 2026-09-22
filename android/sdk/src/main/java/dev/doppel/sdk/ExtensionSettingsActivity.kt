@@ -2,14 +2,11 @@ package dev.doppel.sdk
 
 import android.app.Activity
 import android.content.DialogInterface
-import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
 import android.text.InputFilter
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
-import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -22,27 +19,19 @@ import java.util.concurrent.Executors
 
 class ExtensionSettingsActivity : Activity() {
     private lateinit var gateway: Gateway
-    private lateinit var importer: SkillImportClient
     private lateinit var body: LinearLayout
     private lateinit var status: TextView
     private lateinit var add: ImageButton
     private lateinit var refresh: ImageButton
-    private val tabs = mutableListOf<TextView>()
     private val io = Executors.newSingleThreadExecutor { Thread(it, "doppel-extension-settings").apply { isDaemon = true } }
-    private var selected = 0
     private var busy = false
     private var closed = false
     private var loadedItems = JSONArray()
-    private var pendingSkillUri: Uri? = null
-    private var importingSkill = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         UiTheme.init(this)
         gateway = Gateway(this)
-        importer = SkillImportClient(this, gateway)
-        selected = savedInstanceState?.getInt("tab")?.coerceIn(0, 1) ?: if (DirectMode.isEnabled(this)) 1 else 0
-        pendingSkillUri = savedInstanceState?.getString("pending_skill_uri")?.let(Uri::parse)
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         UiTheme.bind(root) { root.setBackgroundColor(UiTheme.background) }
         UiTheme.window(this, root)
@@ -50,81 +39,53 @@ class ExtensionSettingsActivity : Activity() {
         header.addView(UiTheme.icon(this, UiIcons.back, "返回") { finish() }, square())
         header.addView(UiTheme.text(this, "扩展", 21f, UiTheme.ink, true), LinearLayout.LayoutParams(0, -2, 1f))
         refresh = UiTheme.icon(this, UiIcons.refresh, "刷新扩展") { load() }
-        add = UiTheme.icon(this, UiIcons.plus, "添加服务") { if (selected == 0) editService(null) else chooseSkill() }
+        add = UiTheme.icon(this, UiIcons.plus, "添加服务") { editService(null) }
         header.addView(refresh, square()); header.addView(add, square()); root.addView(header)
-        val navigation = LinearLayout(this).apply { setPadding(dp(22), 0, dp(22), 0) }
-        listOf("服务", "Skills").forEachIndexed { index, label ->
-            val tab = UiTheme.text(this, label, 15f, UiTheme.ink, true).apply {
-                gravity = Gravity.CENTER; minHeight = dp(48); contentDescription = "$label 扩展列表"
-                setOnClickListener { if (!busy && selected != index) { selected = index; load() } }
-            }
-            UiTheme.bind(tab) { tab.setTextColor(if (selected == index) UiTheme.ink else UiTheme.muted) }
-            tabs.add(tab)
-            navigation.addView(tab, LinearLayout.LayoutParams(0, dp(48), 1f))
-        }
-        root.addView(navigation)
         root.addView(UiTheme.divider(this))
         body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(22), dp(12), dp(22), dp(24)) }
         root.addView(ScrollView(this).apply { isFillViewport = true; isVerticalScrollBarEnabled = false; addView(body) }, LinearLayout.LayoutParams(-1, 0, 1f))
         status = UiTheme.text(this, "", 13f, UiTheme.muted).apply { setPadding(dp(22), dp(10), dp(22), dp(18)); accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE }
         root.addView(status)
         setContentView(root)
-        load {
-            if (savedInstanceState?.getBoolean("importing_skill") == true)
-                status.text = "导入页面已重建，请先检查列表；未导入的文件可重新选择。"
-        }
-    }
-
-    override fun onSaveInstanceState(outState: Bundle) {
-        outState.putInt("tab", selected)
-        pendingSkillUri?.let { outState.putString("pending_skill_uri", it.toString()) }
-        outState.putBoolean("importing_skill", importingSkill)
-        super.onSaveInstanceState(outState)
+        load()
     }
 
     private fun dp(value: Int) = UiTheme.dp(this, value)
     private fun square() = LinearLayout.LayoutParams(dp(44), dp(44))
     private fun encoded(value: String) = URLEncoder.encode(value, "UTF-8").replace("+", "%20")
     private fun controls() {
-        val enabled = !busy && (!DirectMode.isEnabled(this) || selected == 1)
+        val enabled = !busy && !DirectMode.isEnabled(this)
         refresh.isEnabled = enabled; add.isEnabled = enabled
-        tabs.forEachIndexed { index, tab ->
-            tab.isEnabled = !busy; tab.isSelected = selected == index
-            tab.setTextColor(if (selected == index) UiTheme.ink else UiTheme.muted)
-        }
-        add.contentDescription = if (selected == 0) "添加服务" else "导入 Skills"
         add.tooltipText = add.contentDescription
     }
 
     private fun load(after: () -> Unit = {}) {
         if (busy || closed) return
         controls()
-        if (DirectMode.isEnabled(this) && selected == 0) {
+        if (DirectMode.isEnabled(this)) {
             loadedItems = JSONArray(); render()
-            status.text = "MCP 服务需要网关连接；本机 Skills 可在另一个标签中管理"
+            status.text = "MCP 服务需要网关连接"
             return
         }
-        request("正在加载", { gateway.request("GET", if (selected == 0) "/extensions" else "/skills") }) { response ->
+        request("正在加载", { gateway.request("GET", "/extensions") }) { response ->
             loadedItems = response.optJSONArray("items") ?: JSONArray()
             render(); after()
-            val invalid = response.optJSONArray("errors")?.length() ?: 0
-            if (invalid > 0) status.text = "$invalid 个 Skills 未通过校验，其余资料仍可使用"
         }
     }
 
     private fun render() {
         body.removeAllViews()
         if (loadedItems.length() == 0) {
-            body.addView(UiTheme.text(this, if (selected == 0) "暂无服务" else "暂无 Skills", 17f, UiTheme.muted).apply {
+            body.addView(UiTheme.text(this, "暂无服务", 17f, UiTheme.muted).apply {
                 gravity = Gravity.CENTER; setPadding(0, dp(72), 0, dp(24))
             })
-            if (!DirectMode.isEnabled(this) || selected == 1) body.addView(UiTheme.command(this, if (selected == 0) "添加服务" else "导入 Skills", true) {
-                if (!busy) { if (selected == 0) editService(null) else chooseSkill() }
+            if (!DirectMode.isEnabled(this)) body.addView(UiTheme.command(this, "添加服务", true) {
+                if (!busy) editService(null)
             }, LinearLayout.LayoutParams(-1, dp(48)))
         }
         for (index in 0 until loadedItems.length()) {
             val item = loadedItems.getJSONObject(index)
-            if (selected == 0) serviceRow(item) else skillRow(item)
+            serviceRow(item)
             if (index < loadedItems.length() - 1) body.addView(UiTheme.divider(this))
         }
     }
@@ -230,81 +191,9 @@ class ExtensionSettingsActivity : Activity() {
             }.show()
     }
 
-    private fun skillRow(item: JSONObject) {
-        val name = item.getString("name")
-        val details = item.optString("description") + when (item.optString("source")) { "host" -> "\n由服务器管理"; "bundled" -> "\n内置知识 · ${item.optString("included_source_version")}"; else -> "" }
-        body.addView(UiTheme.row(this, name, details, UiIcons.files) { if (!busy) openSkill(name) })
-    }
-
-    private fun openSkill(name: String) {
-        request("正在读取 Skill", { gateway.request("GET", "/skills/${encoded(name)}") }) { item ->
-            if (!item.optBoolean("found", true)) { status.text = "Skill 不存在或已变化，请刷新后重试"; return@request }
-            val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            form.addView(UiTheme.text(this, item.optString("description"), 14f, UiTheme.muted))
-            form.addView(UiTheme.text(this, "未验证的外部内容", 12f, UiTheme.muted).apply { setPadding(0, dp(10), 0, dp(16)) })
-            if (item.optBoolean("truncated")) form.addView(UiTheme.text(this, "正文显示前 12000 字符，详细资料可通过资源读取接口按需获取", 12f, UiTheme.muted))
-            form.addView(UiTheme.text(this, item.optString("instructions"), 14f, UiTheme.ink).apply { setTextIsSelectable(true); setLineSpacing(dp(3).toFloat(), 1f) })
-            val resources = item.optJSONArray("resources")
-            if (resources != null) for (index in 0 until resources.length()) {
-                val path = resources.getString(index)
-                form.addView(UiTheme.row(this, path, "按需读取资料", UiIcons.files) { if (!busy) openSkillResource(name, path) })
-            }
-            val dialog = UiDialog.Builder(this).setTitle(name).setView(form).setNegativeButton("关闭", null)
-            if (item.optString("source") == "imported") dialog.setNeutralButton("移除") { _, _ ->
-                UiDialog.Builder(this).setTitle("移除 $name？").setNegativeButton("取消", null).setPositiveButton("移除") { _, _ ->
-                    request("正在移除", { gateway.request("DELETE", "/skills/${encoded(name)}") }) { load() }
-                }.show()
-            }
-            dialog.show()
-        }
-    }
-
-    private fun openSkillResource(name: String, path: String) {
-        request("正在读取资料", { gateway.request("GET", "/skills/${encoded(name)}/resources?path=${encoded(path)}") }) { item ->
-            if (!item.optBoolean("found", true)) { status.text = "资源不存在或已变化，请刷新后重试"; return@request }
-            val text = item.optString("content") + if (item.optBoolean("truncated")) "\n\n此资源超过显示上限，仅显示前 12000 字符。" else ""
-            UiDialog.Builder(this).setTitle(path).setMessage(text).setNegativeButton("关闭", null).show()
-        }
-    }
-
-    private fun chooseSkill() {
-        if (busy) return
-        try {
-            startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                addCategory(Intent.CATEGORY_OPENABLE); type = "*/*"
-                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/zip", "application/x-zip-compressed", "text/markdown", "text/plain", "application/octet-stream"))
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }, 41)
-        } catch (_: Exception) { status.text = "此设备暂时无法打开文件选择器" }
-    }
-
-    @Deprecated("Activity result compatibility")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != 41 || resultCode != RESULT_OK) return
-        if (closed || isFinishing || isDestroyed || pendingSkillUri != null || importingSkill) return
-        val uri = data?.data ?: run { status.text = "没有读取到所选文件，请重新选择"; return }
-        pendingSkillUri = uri
-        importPendingSkill()
-    }
-
-    private fun importPendingSkill() {
-        if (busy || closed || isFinishing || isDestroyed) return
-        val uri = pendingSkillUri ?: return
-        pendingSkillUri = null
-        selected = 1
-        importingSkill = true
-        // The picker result can arrive while onCreate's list request is still running.
-        // Consume it once after that request. Never replay an in-flight POST on recreation.
-        request("正在校验并导入", { importer.upload(uri) }, onError = { importingSkill = false }) { item ->
-            importingSkill = false
-            load { openSkill(item.getString("name")) }
-        }
-    }
-
     private fun <T> request(message: String, work: () -> T, onError: (String) -> Unit = {}, done: (T) -> Unit) {
         if (busy || closed) return
-        if (DirectMode.isEnabled(this) && selected == 0) { status.text = "MCP 服务需要网关连接；本机 Skills 可在另一个标签中管理"; return }
+        if (DirectMode.isEnabled(this)) { status.text = "MCP 服务需要网关连接"; return }
         busy = true; controls(); status.text = message
         io.execute {
             val result = runCatching(work)
@@ -315,13 +204,12 @@ class ExtensionSettingsActivity : Activity() {
                     val text = if (error is IllegalArgumentException || error is IllegalStateException) error.message.orEmpty().take(160) else "连接未完成，请检查服务后重试"
                     status.text = text; onError(text)
                 })
-                importPendingSkill()
             }
         }
     }
 
     override fun onDestroy() {
-        closed = true; importer.close(); io.shutdownNow()
+        closed = true; io.shutdownNow()
         super.onDestroy()
     }
 }

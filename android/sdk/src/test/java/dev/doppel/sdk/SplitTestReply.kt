@@ -23,12 +23,22 @@ internal object SplitTestReply {
                 if (!value.has("swipe_extent")) value.put("swipe_extent", "small")
                 if (!value.has("scroll_goal")) value.put("scroll_goal", "inspect")
                 if (!value.has("boundary_reason")) value.put("boundary_reason", "")
+                if (value.optString("action") == "swipe" && !value.has("start_hold_ms")) value.put("start_hold_ms", 0)
+                value.optJSONArray("gesture_contracts")?.let { contracts -> repeat(contracts.length()) {
+                    contracts.getJSONObject(it).let { contract -> if (!contract.has("start_hold_ms")) contract.put("start_hold_ms", 0) }
+                } }
             }
         }
         if (value.optString("kind") == "wait") {
             if (!value.has("reason")) value.put("reason", "等待设备状态更新")
             if (!value.has("wait_condition")) value.put("wait_condition", "新截图显示操作入口可用")
             if (!value.has("evidence")) value.put("evidence", "本测试设备回执尚未显示操作入口")
+        }
+        if (value.optString("kind") == "read_web") {
+            if (!value.has("operation")) value.put("operation", "read")
+            if (!value.has("query")) value.put("query", "")
+            if (!value.has("offset")) value.put("offset", 0)
+            if (!value.has("limit")) value.put("limit", 4000)
         }
         if (grounding || value.has("points") || value.has("strokes")) {
             val action = value.optString("action")
@@ -40,6 +50,8 @@ internal object SplitTestReply {
             if (value.optString("kind") == "execute" && value.opt("action") is String) {
                 value.put("kind", value.getString("action")); value.remove("action")
             }
+            if (value.optString("kind") == "tap" && !value.has("request_login_code")) value.put("request_login_code", JSONObject.NULL)
+            if (value.optString("kind") == "manual_takeover" && !value.has("reason")) value.put("reason", JSONObject.NULL)
             val state = value.optJSONObject("state")
             value.remove("state")
             state?.let {

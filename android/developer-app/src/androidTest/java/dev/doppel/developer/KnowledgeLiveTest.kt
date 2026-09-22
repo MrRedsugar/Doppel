@@ -1,3 +1,5 @@
+@file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+
 package dev.doppel.developer
 
 import android.content.Context
@@ -17,7 +19,7 @@ import java.security.MessageDigest
 
 /** Explicit public-network QA. No model, credentials, task submission or screen actions. */
 class KnowledgeLiveTest {
-    @Test fun publicWebAndBundledSkillHaveRealReadableProvenance() {
+    @Test fun publicWebHasRealReadableProvenance() {
         assumeTrue("Opt in with -e knowledge_live true", InstrumentationRegistry.getArguments().getString("knowledge_live") == "true")
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val gateway = Gateway(context)
@@ -28,50 +30,17 @@ class KnowledgeLiveTest {
         val runsBefore = readRuns(runsFile)
         val evidence = JSONObject().put("schema", 1).put("started_at_ms", System.currentTimeMillis())
             .put("ok", false).put("model_calls_requested", 0).put("screen_actions_requested", 0)
-        val web = AndroidWebResearch()
+        val web = AndroidWebResearch(context)
         var stage = "preconditions"
         try {
             assertTrue("Existing direct mode is required; this test does not change settings", gateway.isDirectMode())
             assertTrue("Existing accepted notices are required", FirstUseConsent.isAccepted(context))
-            val persistedRuns = JSONArray(runsBefore?.toString(Charsets.UTF_8) ?: "[]")
+            val persistedRuns = dev.doppel.sdk.SplitTaskEngine.readPersistedRuns(runsBefore?.toString(Charsets.UTF_8) ?: "[]")
             for (index in 0 until persistedRuns.length()) {
                 assertTrue("Pause existing tasks before isolated knowledge QA",
                     persistedRuns.getJSONObject(index).optString("status") in setOf("paused", "completed", "failed", "cancelled"))
             }
             evidence.put("tracked_runs", persistedRuns.length())
-
-            stage = "skill_catalogue"
-            val catalogue = gateway.request("GET", "/skills").getJSONArray("items")
-            val skill = (0 until catalogue.length()).map { catalogue.getJSONObject(it) }
-                .single { it.optString("name") == "arknights" && it.optString("source") == "bundled" }
-            assertFalse(skill.getBoolean("trusted"))
-            assertFalse("The catalogue must retain progressive disclosure", skill.has("instructions"))
-            val revision = skill.getString("revision")
-            assertTrue(revision.matches(Regex("[0-9a-f]{64}")))
-            assertTrue(skill.getString("included_source_version").isNotBlank())
-
-            stage = "skill_body"
-            val loaded = gateway.request("GET", "/skills/arknights")
-            assertTrue(loaded.getBoolean("found"))
-            assertFalse(loaded.getBoolean("trusted"))
-            assertEquals(revision, loaded.getString("revision"))
-            assertTrue(loaded.getString("instructions").isNotBlank())
-            val resources = loaded.getJSONArray("resources")
-            assertTrue((0 until resources.length()).any { resources.getString(it) == "references/sources.md" })
-
-            stage = "skill_resource"
-            val source = gateway.request("GET", "/skills/arknights/resources?path=references%2Fsources.md")
-            assertTrue(source.getBoolean("found"))
-            assertFalse(source.getBoolean("trusted"))
-            assertEquals(revision, source.getString("revision"))
-            val sourceText = source.getString("content")
-            assertTrue("Bundled source must contain public provenance", sourceText.contains("https://"))
-            val bundledSource = context.assets.open("skills/arknights/references/sources.md").use { it.readBytes() }
-            assertEquals("The resource must retain the bundled source's exact content", sha256(bundledSource), sha256(sourceText.toByteArray()))
-            evidence.put("skill", JSONObject().put("name", "arknights").put("revision", revision)
-                .put("included_source_version", skill.getString("included_source_version"))
-                .put("resource", "references/sources.md").put("resource_sha256", sha256(sourceText.toByteArray()))
-                .put("source_excerpt", sourceText.take(1800)).put("trusted", false))
 
             stage = "public_search"
             FirstUseConsent.requireAccepted(context)
@@ -93,7 +62,7 @@ class KnowledgeLiveTest {
             stage = "search_validation"
             assertWebReference(search)
             assertPublicUrl(search.getString("source_url"))
-            assertTrue(search.getString("provider").isNotBlank())
+            assertTrue(search.getString("provider") in setOf("bing", "sogou"))
             val results = search.getJSONArray("results")
             assertTrue("Real search must return at least one result without assuming ranking", results.length() in 1..6)
             for (index in 0 until results.length()) {
@@ -102,6 +71,10 @@ class KnowledgeLiveTest {
                 assertTrue(item.getString("title").isNotBlank())
                 assertTrue(item.getString("source").isNotBlank())
             }
+            assertTrue("Search results should concern the requested game", (0 until results.length()).any {
+                val item = results.getJSONObject(it)
+                (item.getString("title") + item.optString("snippet")).contains("明日方舟")
+            })
             stage = "read_validation"
             assertWebReference(read)
             assertPublicUrl(read.getString("url"))

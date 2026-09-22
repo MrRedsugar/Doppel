@@ -12,7 +12,7 @@ import java.util.ArrayDeque
 
 /**
  * Fast event-driven trigger engine. It inspects accessibility nodes only; no LLM,
- * screenshot or network request is made. A running/pending task always wins.
+ * screenshot or network request is made. Task matches enter the shared FIFO; direct actions require an idle device.
  */
 class AutoTriggerEngine(private val service: AccessibilityService) {
     private val store = AutoTriggerStore(service)
@@ -63,7 +63,10 @@ class AutoTriggerEngine(private val service: AccessibilityService) {
         // A notice, PIN dialog or system overlay is not evidence that the
         // underlying target disappeared. In particular Skip must not re-arm it.
         if (pkg.isBlank() || pkg == service.packageName || root.window?.type == AccessibilityWindowInfo.TYPE_SYSTEM) return
-        rules.filter { it.packageName != pkg }.forEach { appearances[it.id]?.absent() }
+        rules.filter { it.packageName != pkg }.forEach {
+            appearances[it.id]?.absent()
+            AutoTriggerTaskLauncher.absent(service, it.id)
+        }
         val relevantRules = rules.filter { it.packageName == pkg }
         if (relevantRules.isEmpty()) return
         val nodes = mutableMapOf<String, AccessibilityNodeInfo>()
@@ -89,7 +92,10 @@ class AutoTriggerEngine(private val service: AccessibilityService) {
         // Observe absence even while another task owns the device; otherwise
         // a genuinely new appearance after that task would remain suppressed.
         relevantRules.forEach { rule ->
-            if (complete && rule.matchResourceId !in nodes) appearances[rule.id]?.absent()
+            if (complete && rule.matchResourceId !in nodes) {
+                appearances[rule.id]?.absent()
+                AutoTriggerTaskLauncher.absent(service, rule.id)
+            }
         }
         relevantRules.forEach { rule ->
             // Trigger identity is resource-id only. Text is display metadata and
@@ -97,9 +103,8 @@ class AutoTriggerEngine(private val service: AccessibilityService) {
             val trigger = nodes[rule.matchResourceId] ?: return@forEach
             val occurrence = appearances.getOrPut(rule.id) { AutoTriggerOccurrence() }
             if (!occurrence.canTrigger(now, rule.cooldownMs)) return@forEach
-            // A task match may post a blocked-task message while busy. The
-            // launcher still cannot execute until the user explicitly replaces
-            // the current task. Direct accessibility actions must never run then.
+            // Task matches can join the FIFO while busy. Direct accessibility
+            // actions still must not compete with the current device owner.
             if (hasActiveTask() && rule.action != "task") return@forEach
             val attempt = occurrence.begin(now, rule.cooldownMs) ?: return@forEach
             fun settled(accepted: Boolean) {
@@ -143,8 +148,7 @@ class AutoTriggerEngine(private val service: AccessibilityService) {
         if (TaskSubmissionGate.creating.get() || AutomaticUnlockSession.active || AccessibilityControlPicker.active) return true
         val active = service.getSharedPreferences("doppel", 0).getString("active_run", "").orEmpty()
         if (active.isNotBlank()) return true
-        val worker = DeviceWorkerService.instance
-        return worker != null && !worker.isPaused
+        return DeviceWorkerService.instance?.hasActiveExecution == true
     }
 
     private fun click(node: AccessibilityNodeInfo?): Boolean {

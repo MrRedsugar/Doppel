@@ -1,0 +1,30 @@
+Apache POI 5.5.1, adapted for Android using centic9/poi-on-android
+https://github.com/centic9/poi-on-android/tree/a29c7a4cdd94175c2be43678c82afc818b60ff3f
+
+Android adapter copyright 2015-2024 Dominik Stadler.
+Licensed under Apache License 2.0; see ../Apache-2.0.txt.
+
+Doppel builds the upstream poishadow module and uses its Java sources unchanged.
+Build-only changes: retain commons-codec and commons-lang3 omitted by the demo;
+make archive timestamps/order reproducible; export dependency versions, hashes,
+and upstream notices. ProGuard consumer rules are adapted from the upstream
+sample, omitting app-wide optimization settings and preserving parser factories.
+
+Original LICENSE/NOTICE files from the bundled Maven artifacts are reproduced
+verbatim beside this file with coordinate-prefixed names. Apache POI, XMLBeans,
+Commons libraries and the relocated StAX API remain under their original licenses.
+The excluded curvesapi dependency is not bundled in this jar.
+
+StAX API 1.0.1 (stax:stax-api)
+The published Maven POM declares the Apache Software License, Version 2.0.
+Its binary distribution contains no separate LICENSE/NOTICE file.
+See ../Apache-2.0.txt.
+https://repo.maven.apache.org/maven2/stax/stax-api/1.0.1/stax-api-1.0.1.pom
+
+SparseBitSet 1.3 (com.zaxxer:SparseBitSet)
+Apache License 2.0; see ../Apache-2.0.txt.
+The following attribution is reproduced from its published 1.3 source:
+"This software is the work of Paladin Software International, Incorporated,
+ based upon previous work done for and by Sun Microsystems, Inc."
+https://github.com/brettwooldridge/SparseBitSet/tree/SparseBitSet-1.3
+https://repo.maven.apache.org/maven2/com/zaxxer/SparseBitSet/1.3/

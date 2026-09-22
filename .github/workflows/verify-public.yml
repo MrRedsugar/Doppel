@@ -43,13 +43,17 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
       - uses: android-actions/setup-android@v3
       - name: Install Android SDK Components
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Rebuild Pinned Android Office Parser
+        run: |
+          python scripts/prepare-android-office-parser.py
+          python scripts/prepare-android-office-parser.py --verify-only
       - name: Prepare Pinned Chinese Speech Assets
         run: |
           python scripts/prepare-embedded-tts.py --download

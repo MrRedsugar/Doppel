@@ -136,20 +136,45 @@ to be detected. Existing scope, payment, and repetition guards remain active.
 
 ## Local profiles
 
-Open Login Assistance in Android Settings, save a common phone number, then add
-an application. Each application requires opt-in and an SMS service signature
-(the service name in its login message). An optional per-app phone overrides the
-common number. Profiles are encrypted with an Android Keystore AES-GCM key and
-remain on that device. Edit, disable, or delete them independently of cloud
-account memory.
+Open Login Settings, unlock with the existing vault PIN (or create it on first
+use), then add an application and choose **account/password** or **SMS code**.
+New applications are enabled by default; each application's switch is on the
+outer list. Editing preserves its enabled state. Switching methods preserves
+both sets of saved information, while local execution permits only the selected
+method. No SMS service name or signature is required. An optional per-app phone
+overrides the common number. Password entries remain in the original encrypted
+CredentialVault with the same PIN and keys; selected account IDs preserve
+multiple saved accounts without choosing an arbitrary first account.
+
+Existing single-method authorizations retain their choice and enabled state.
+Conflicting legacy password and SMS authorizations require the user to choose a
+method before automatic filling is enabled. Saving the merged configuration
+migrates only method/authorization metadata, not password ciphertext.
+
+The planner can report `manual_takeover` with structured `reason: "login"`.
+Login interruptions show a **设置登录方式** button on the pause surface and task
+details, including the first interruption. It opens this same protected page,
+optionally targeting the observed application. Entering or leaving settings does
+not resume a task; the user explicitly continues after configuration. Local
+login takeover receipts preserve this reason and request identity across reloads.
 
 Enable notification access in Android system settings. The listener considers
 only new notifications from the current default SMS app during an armed login
 session. It does not read the SMS database or archive notification bodies. It
-requires the expected foreground app, configured service signature, one
-unambiguous 4-8 digit code, and a timestamp after the session began. Payment and
-transfer messages are excluded. Hidden contents, unsupported providers, or
-ambiguous messages require manual entry.
+requires the expected foreground app, a clearly identified 4-8 digit code, and a
+timestamp after the session began. Code extraction handles incidental numbers
+such as a phone suffix or validity duration. Company names need not equal the
+application name. Multiple messages appear as redacted candidate contexts and
+opaque IDs for A to select; raw OTPs remain local. Payment and transfer messages
+are excluded. Hidden notification contents and unresolved ambiguity require manual entry.
+
+In the current A/B and direct flows, A marks a send/resend login-code tap with
+`request_login_code: true`. The existing dispatcher arms the five-minute app/run
+session immediately before the actual gesture, including when the phone number
+is already filled. Resending invalidates old candidates. Rejected or unconfirmed
+gestures cancel only their own request window. This adds no model call; B still
+only locates the requested control. Legacy `login_phone` callers retain their
+existing session start as a compatibility fallback.
 
 | MCP/Harness tool | Inputs | Device operation |
 | --- | --- | --- |

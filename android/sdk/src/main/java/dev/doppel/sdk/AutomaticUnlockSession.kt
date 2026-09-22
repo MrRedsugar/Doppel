@@ -138,6 +138,13 @@ internal object AutomaticUnlockSession {
             finish("任务已结束或暂停，正在重新锁屏")
         }
     }
+    /** Called off the main thread after exact-run termination; wait for the queued freeze/relock cleanup. */
+    internal fun awaitRunCleanup(runId: String): Boolean {
+        val owner = session?.takeIf { it.runId == runId } ?: return true
+        val deadline = SystemClock.elapsedRealtime() + 5000
+        while (session === owner && owner.phase != Phase.RELOCK_FAILED && SystemClock.elapsedRealtime() < deadline) Thread.sleep(25)
+        return session !== owner || owner.phase == Phase.RELOCK_FAILED
+    }
     fun update(message: String) { main.post {
         session?.let { owner ->
             owner.message = message
@@ -213,15 +220,27 @@ internal object AutomaticUnlockSession {
             return
         }
         synchronized(operationLock) { owner.handoffReturnPhase = owner.phase; owner.handoffAction = action }
-        AutomaticRunShield.update("正在等待当前动作完成，然后验证密码")
+        AutomaticRunShield.update("正在等待当前动作完成")
         showPendingHandoff(owner)
     }
+
+    private fun lanHandoffAvailable(owner: Session): Boolean =
+        !owner.attemptUnconfirmed && !owner.ending &&
+            (owner.phase == Phase.RUNNING || owner.phase == Phase.AUTHENTICATING && owner.handoffReturnPhase == Phase.RUNNING) &&
+            AutomaticUnlockCredentials.isLanHandoffEnabled(owner.context) && AutomaticUnlockCredentials.isEnabled(owner.context) &&
+            !locked(owner.context) && SdkCompanionService.hasTrustedLanPresence(owner.context)
 
     private fun showPendingHandoff(owner: Session) {
         if (session !== owner || owner.phase !in setOf(Phase.RUNNING, Phase.RELOCK_FAILED) || owner.handoffAction == null) return
         synchronized(operationLock) {
             if (operations != 0) return
             owner.phase = Phase.AUTHENTICATING
+        }
+        // Recheck after the long hold AND after in-flight actions drain. Never cache approval at unlock.
+        if (owner.handoffAction == "pause" && live(owner) && lanHandoffAvailable(owner)) {
+            completeHandoff(owner)
+            Toast.makeText(owner.context, "已通过附近电脑确认，已接管", Toast.LENGTH_SHORT).show()
+            return
         }
         val kind = AutomaticUnlockCredentials.readSaved(owner.context)?.use { it.kind }
         owner.handoffStartedAt = SystemClock.elapsedRealtime()
@@ -275,9 +294,7 @@ internal object AutomaticUnlockSession {
                 difference == 0
             } == true
             if (matches) {
-                main.removeCallbacks(handoffTimeout)
-                freeze(owner, owner.handoffAction ?: "pause")
-                clear(owner)
+                completeHandoff(owner)
             } else {
                 owner.handoffFailures++
                 if (owner.handoffFailures >= 3) authenticationCancelled()
@@ -287,6 +304,12 @@ internal object AutomaticUnlockSession {
                 }
             }
         } finally { value.fill('\u0000') }
+    }
+
+    private fun completeHandoff(owner: Session) {
+        main.removeCallbacks(handoffTimeout)
+        freeze(owner, owner.handoffAction ?: "pause")
+        clear(owner)
     }
 
     fun authenticationCancelled() {
@@ -397,6 +420,7 @@ internal object AutomaticUnlockSession {
     private val watchdog = object : Runnable {
         override fun run() {
             val owner = session ?: return
+            AutomaticRunShield.setLanHandoffAvailable(lanHandoffAvailable(owner))
             if (owner.phase in setOf(Phase.UNLOCKING, Phase.READY, Phase.RUNNING) ||
                 owner.phase == Phase.AUTHENTICATING && owner.handoffReturnPhase == Phase.RUNNING) {
                 if (!live(owner) || DoppelAccessibilityService.instance == null ||

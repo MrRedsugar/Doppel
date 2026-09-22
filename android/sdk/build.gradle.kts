@@ -2,7 +2,7 @@ plugins { id("com.android.library"); id("org.jetbrains.kotlin.android") }
 android {
     namespace = "dev.doppel.sdk"
     compileSdk = 35
-    defaultConfig { minSdk = 26; testInstrumentationRunner = "android.test.InstrumentationTestRunner"; consumerProguardFiles("consumer-rules.pro") }
+    defaultConfig { minSdk = 26; testInstrumentationRunner = "android.test.InstrumentationTestRunner"; consumerProguardFiles("consumer-rules.pro", "poi-consumer-rules.pro") }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
     sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("generated/ttsAssets"))
@@ -37,7 +37,9 @@ dependencies {
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jsoup:jsoup:1.18.3")
-    implementation("org.yaml:snakeyaml:2.4")
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
+    implementation(files("libs/poi-android-5.5.1.jar"))
+    implementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.1")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
 }

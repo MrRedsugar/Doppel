@@ -80,8 +80,11 @@ internal class ScreenshotArchive(
     private fun runFolders() = root.listFiles().orEmpty().filter {
         it.isDirectory && safeId.matches(it.name) && runCatching { folder(it.name).canonicalFile == it.canonicalFile }.getOrDefault(false)
     }
-    @Synchronized fun save(run: String, command: String, bytes: ByteArray, metadata: JSONObject): JSONObject {
+    @Synchronized fun save(run: String, command: String, bytes: ByteArray, metadata: JSONObject,
+        days: Int = 0, validRuns: Set<String>? = null): JSONObject {
+        checked(run)
         checked(command)
+        require(validRuns == null || run in validRuns) { "截图所属任务不存在" }
         val (width, height) = dimensions(bytes)
         require(bytes.size <= maxBytes) { "截图超过存储上限" }
         val id = digest(command.toByteArray(Charsets.UTF_8)).take(32)
@@ -92,9 +95,14 @@ internal class ScreenshotArchive(
         metadata.optString("capture_id").takeIf { safeId.matches(it) }?.let { item.put("capture_id", it) }
         val recordBytes = item.toString().toByteArray(Charsets.UTF_8)
         require(bytes.size.toLong() + recordBytes.size <= maxBytes) { "截图及记录超过存储上限" }
-        // Interrupted writes cannot accumulate outside the quota between successful saves.
-        maintain(0, null)
-        entries(run).firstOrNull { it.getString("id") == id }?.let { return JSONObject(it.toString()) }
+        // Scan once: remove expired/orphaned writes, then reuse the records for deduplication and quotas.
+        val retained = scan(days, validRuns)
+        val existing = retained.firstOrNull { it.getString("run_id") == run && it.getString("id") == id }
+        if (existing != null && footprint(existing) <= maxBytes) {
+            enforceBounds(retained, run to id)
+            return JSONObject(existing.toString())
+        }
+        existing?.let { retained.remove(it) }
         try {
             atomic(file(run, id, ".png"), bytes)
             atomic(file(run, id, ".json"), recordBytes)
@@ -102,7 +110,8 @@ internal class ScreenshotArchive(
             runCatching { delete(run, id) }
             throw failure
         }
-        maintain(0, null, run to id)
+        retained.add(item)
+        enforceBounds(retained, run to id)
         return JSONObject(item.toString())
     }
     @Synchronized fun list(run: String): JSONObject = JSONObject().put("items", JSONArray(entries(run)))
@@ -135,7 +144,7 @@ internal class ScreenshotArchive(
         if (folder(run).listFiles()?.isEmpty() == true) folder(run).delete()
     }
     @Synchronized fun prune(days: Int, validRuns: Set<String>? = null) {
-        maintain(days, validRuns)
+        enforceBounds(scan(days, validRuns))
     }
     private fun removeOwned(run: String, value: File) {
         check(!value.exists() || (value.isFile && value.canonicalFile == file(run, value.nameWithoutExtension, "." + value.extension).canonicalFile && value.delete())) { "截图删除失败" }
@@ -143,22 +152,32 @@ internal class ScreenshotArchive(
     private fun footprint(item: JSONObject): Long = file(item.getString("run_id"), item.getString("id"), ".png").length() +
         file(item.getString("run_id"), item.getString("id"), ".json").length()
 
-    private fun maintain(days: Int, validRuns: Set<String>?, preserve: Pair<String, String>? = null) {
+    private fun scan(days: Int, validRuns: Set<String>?): MutableList<JSONObject> {
         require(days in setOf(0, 1, 7, 30, 90)) { "截图保留时间无效" }
         val cutoff = if (days == 0) Long.MIN_VALUE else now() - days * 86400000L
-        val order = compareBy<JSONObject> { (it.getString("run_id") to it.getString("id")) == preserve }
-            .thenBy { it.getLong("created_at") }
         val retained = mutableListOf<JSONObject>()
         for (folder in runFolders()) {
             if (validRuns != null && folder.name !in validRuns) { delete(folder.name); continue }
-            val records = entries(folder.name).filter { it.getLong("created_at") >= cutoff }.sortedWith(order)
-            val keep = records.takeLast(maxPerRun)
-            val ids = keep.map { it.getString("id") }.toSet()
+            val files = ownedFiles(folder.name)
+            val records = files.filter { it.extension == "json" }.mapNotNull { metadata(folder.name, it) }
+                .filter { it.getLong("created_at") >= cutoff }
+            val ids = records.map { it.getString("id") }.toSet()
             // A JSON filename alone is not evidence of a complete, valid committed pair.
-            ownedFiles(folder.name).filter { it.extension == "part" || it.nameWithoutExtension !in ids }
+            files.filter { it.extension == "part" || it.nameWithoutExtension !in ids }
                 .forEach { removeOwned(folder.name, it) }
-            retained.addAll(keep)
+            retained.addAll(records)
             if (folder.listFiles()?.isEmpty() == true) folder.delete()
+        }
+        return retained
+    }
+
+    private fun enforceBounds(records: List<JSONObject>, preserve: Pair<String, String>? = null) {
+        val order = compareBy<JSONObject> { (it.getString("run_id") to it.getString("id")) == preserve }
+            .thenBy { it.getLong("created_at") }
+        val retained = records.groupBy { it.getString("run_id") }.flatMap { (run, items) ->
+            val sorted = items.sortedWith(order)
+            sorted.dropLast(maxPerRun).forEach { delete(run, it.getString("id")) }
+            sorted.takeLast(maxPerRun)
         }
         // The limit covers actual PNG + JSON files, including a damaged image's actual size.
         var total = retained.sumOf { footprint(it) }

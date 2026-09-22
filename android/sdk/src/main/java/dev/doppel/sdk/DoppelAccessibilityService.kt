@@ -38,6 +38,7 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
     private val autoTriggers by lazy { AutoTriggerEngine(this) }
     private val visualCaptures = VisualCaptureStore { android.os.SystemClock.elapsedRealtime() }
     private var latestSnapshot: TargetScreenSnapshot? = null
+    private val windowPackages = java.util.concurrent.ConcurrentHashMap<Int, String>()
     @Volatile private var navigationGeneration = 0
     private var windowSignature = ""
     private val touchGuards = mutableListOf<View>()
@@ -45,6 +46,63 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
     private val guardPassDiagnostic = java.util.concurrent.atomic.AtomicReference<TouchHandoffDiagnostic?>()
     private var guardRequested = false
     private val ownGestureGeneration = java.util.concurrent.atomic.AtomicLong(-1)
+    private val platformGestures = DeviceActionDrain()
+    @Volatile private var gestureReleaseFailed = false
+    private fun dispatchTrackedGesture(runId: String, description: GestureDescription, callback: GestureResultCallback,
+        handler: android.os.Handler, allowed: () -> Boolean): Boolean = platformGestures.dispatch(runId, allowed) { finish ->
+            dispatchGesture(description, object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    finish(); callback.onCompleted(gestureDescription)
+                }
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    finish(); callback.onCancelled(gestureDescription)
+                }
+            }, handler)
+    }
+    /** HOLD completion retains DOWN; only the terminal continuation releases this drain ticket. */
+    private fun dispatchHeldGesture(runId: String, path: Path, start: FeedbackPoint, holdMs: Long, moveMs: Long,
+        callback: GestureResultCallback, allowed: () -> Boolean): Boolean = platformGestures.dispatch(runId, allowed) { finish ->
+        val stationary = Path().apply { moveTo(start.x, start.y) }
+        val hold = GestureDescription.StrokeDescription(stationary, 0, holdMs, true)
+        lateinit var deadline: Runnable
+        val dispatch=HeldGestureDispatch(allowed, { phase, returned ->
+            // Recheck immediately before movement. Cleanup must still release DOWN after revocation.
+            if (phase == HeldGestureDispatch.Phase.MOVE && !allowed()) false
+            else {
+                val stroke = when (phase) {
+                    HeldGestureDispatch.Phase.HOLD -> hold
+                    HeldGestureDispatch.Phase.MOVE -> hold.continueStroke(path, 0, moveMs, false)
+                    HeldGestureDispatch.Phase.RELEASE -> hold.continueStroke(stationary, 0, 1, false)
+                }
+                dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), object : GestureResultCallback() {
+                    override fun onCompleted(gestureDescription: GestureDescription?) { returned(true) }
+                    override fun onCancelled(gestureDescription: GestureDescription?) { returned(false) }
+                }, mainHandler)
+            }
+        }, { completed ->
+            mainHandler.removeCallbacks(deadline)
+            finish()
+            if (completed) callback.onCompleted(null) else callback.onCancelled(null)
+        }, {
+            mainHandler.removeCallbacks(deadline)
+            // Neither a failed cleanup submission nor a missing callback proves UP. Close
+            // admission and let Android tear down this service's injector before recovery.
+            gestureReleaseFailed=true
+            TaskControl.invalidate()
+            val reason="触摸结束未确认，任务已暂停。请重新启用 Doppel 无障碍服务，再核对画面后继续。"
+            val worker=DeviceWorkerService.instance
+            if(worker!=null) worker.stopWithReason(reason,"interruption",preservePrevious=false)
+            else runCatching { DirectRuntime.interrupt(this,reason) }
+            AutomaticUnlockSession.interrupted()
+            android.util.Log.e("DoppelGesture", "held_gesture_release_unconfirmed")
+            runCatching { disableSelf() }.onFailure { android.util.Log.e("DoppelGesture","service_disable_failed") }
+        })
+        deadline=Runnable {dispatch.timeout()}
+        dispatch.start().also { accepted -> if(accepted) mainHandler.postDelayed(deadline,holdMs+moveMs+2000) }
+    }
+    /** Enter after admission is closed; an abandoned wait is not a platform completion callback. */
+    @Synchronized internal fun awaitExecutionStopped(runIds: Set<String>? = null): Boolean = platformGestures.awaitStopped(runIds)
+    internal fun afterGesturesStopped(release: () -> Unit) = platformGestures.afterStopped(release=release)
     private var guardedCompanion: Rect? = null
     private val feedback by lazy { ActionFeedbackOverlay(this) }
     private val actionGeneration = visualCaptures.generation
@@ -53,6 +111,9 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
         if (key == "action_feedback" && !prefs.getBoolean(key, true)) prefs.edit().putBoolean("action_feedback", true).apply()
     }
     @Volatile private var privateCaptureBounds: List<List<Int>> = emptyList()
+    private val privateWindowBounds = mutableMapOf<Int, List<List<Int>>>()
+    private val privateWindowGeometry = mutableMapOf<Int, Triple<Int, Int, Int>>()
+    private var privacyBackdropWindowId: Int? = null
     val feedbackVisible: Boolean get() = feedback.visible
     @Volatile var guardVisible = false
         private set
@@ -71,23 +132,35 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
         }
     }
     override fun onDestroy() {
+        gestureReleaseFailed=true
+        instance=null
+        platformGestures.onDisconnected()
         if (AutomaticUnlockSession.active) { performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN); AutomaticUnlockSession.interrupted() }
-        DemonstrationSession.cancel()
         AccessibilityControlPicker.stop()
         if (Build.VERSION.SDK_INT >= 31) (modeListener as? android.media.AudioManager.OnModeChangedListener)?.let { getSystemService(android.media.AudioManager::class.java).removeOnModeChangedListener(it) }
         getSharedPreferences("doppel", MODE_PRIVATE).unregisterOnSharedPreferenceChangeListener(feedbackSettingsListener); stopActionFeedback(); visualCaptures.clear(); LoginAssist.clearSession(); setTouchGuard(false); targetHistory.clear(); instance = null; super.onDestroy()
     }
-    override fun onInterrupt() { logTouchPause("service_interrupt"); DeviceWorkerService.instance?.pause() }
+    override fun onInterrupt() { logTouchPause("service_interrupt"); DeviceWorkerService.instance?.pauseActiveRun() }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        event?.packageName?.toString()?.takeIf { it.isNotBlank() && event.windowId >= 0 }?.let { pkg ->
+            // Only system-delivered window identities, never screen text or a model-supplied package.
+            if (windowPackages.size >= 64 && !windowPackages.containsKey(event.windowId)) windowPackages.clear()
+            windowPackages[event.windowId] = pkg
+        }
         val ownOverlayState = event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
             event.packageName?.toString() == packageName && windows.any {
                 it.id == event.windowId && (it.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY || ownOverlayWindow(it))
             }
         if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && !ownOverlayState) {
-            navigationGeneration++
+            // A delayed event from our overlay may arrive before Android lists that window.
+            // It is not navigation when a different window is still in the foreground.
+            val foreground = visualWindow()
+            val ownBackgroundEvent = event.packageName?.toString() == packageName &&
+                foreground != null && event.windowId != foreground.id
+            if (!ownBackgroundEvent) navigationGeneration++
         }
         if (event?.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
-            val signature = windows.filter { it.type != AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY && !ownOverlayWindow(it) }.joinToString { window ->
+            val signature = windows.filter { !ownCaptureOverlay(it) }.joinToString { window ->
                 val rect = Rect(); window.getBoundsInScreen(rect)
                 "${window.id}:${window.isFocused}:${window.isActive}:$rect"
             }
@@ -100,13 +173,15 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
             val reason = InterruptionPolicy.reason(event.packageName?.toString().orEmpty(), event.text.map { it.toString() })
             if (reason != null) DeviceWorkerService.instance?.interruptForSystem(reason)
         }
-        if (event?.eventType == AccessibilityEvent.TYPE_TOUCH_INTERACTION_START && !AutomaticUnlockSession.active) { logTouchPause("accessibility_touch_start"); navigationGeneration++; targetHistory.clear(); stopActionFeedback(); DeviceWorkerService.instance?.pause() }
+        if (event?.eventType == AccessibilityEvent.TYPE_TOUCH_INTERACTION_START && !AutomaticUnlockSession.active) {
+            navigationGeneration++; targetHistory.clear()
+            if (getSharedPreferences("doppel", MODE_PRIVATE).getBoolean("touch_pause", true)) {
+                logTouchPause("accessibility_touch_start"); DeviceWorkerService.instance?.pauseActiveRun()
+            }
+        }
         // Keep this after interruption detection so a system dialog/call always wins.
         // AutoTriggerEngine is node-only and does not issue model/network requests.
         runCatching { autoTriggers.onEvent(event) }
-        // Application learning was removed from the product flow. Keep legacy
-        // demonstration state cancellable on service shutdown, but never collect
-        // new screenshots or accessibility traces at runtime.
     }
     /** Current application/system root, preferring the focused non-overlay window.
      * Android 14 can make rootInActiveWindow point at an accessibility overlay;
@@ -135,10 +210,119 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
         return null
     }
     fun foregroundPackage(): String = activeRoot()?.packageName?.toString().orEmpty()
+    private fun visualWindow(): AccessibilityWindowInfo? {
+        val current = windows.filter { it.displayId == Display.DEFAULT_DISPLAY &&
+            it.type in setOf(AccessibilityWindowInfo.TYPE_APPLICATION, AccessibilityWindowInfo.TYPE_SYSTEM) }
+            .sortedByDescending { it.layer }
+        return current.firstOrNull { it.isFocused } ?: current.firstOrNull { it.isActive && !ownOverlayWindow(it) }
+    }
+    private fun visualWindowPackage(window: AccessibilityWindowInfo): String {
+        val node = window.root
+        val pkg = try { node?.packageName?.toString()?.takeIf { it.isNotBlank() } }
+            finally { @Suppress("DEPRECATION") node?.recycle() }
+        if (pkg != null) windowPackages[window.id] = pkg
+        // A window ID remains authoritative even when Android withholds the package and tree.
+        // The explicit window: prefix is not a claim that this is a real application package.
+        return pkg ?: windowPackages[window.id] ?: "window:${window.id}"
+    }
+    private fun currentVisualWindowMatches(windowId: Int?, pkg: String): Boolean {
+        // Window events can reach this service later than the new visible window.
+        // Read current system metadata before injection instead of trusting the event cache.
+        if (Build.VERSION.SDK_INT >= 33) clearCache()
+        return visualWindow()?.let { it.id == windowId && visualWindowPackage(it) == pkg } == true
+    }
+
+    private fun captureWindowSignature(): String = windows.filter { it.displayId == Display.DEFAULT_DISPLAY &&
+        !ownCaptureOverlay(it) }
+        .sortedBy { it.id }.joinToString { window ->
+            val bounds = Rect().also(window::getBoundsInScreen)
+            "${window.id}:${window.type}:${window.layer}:${window.isFocused}:${window.isActive}:$bounds"
+        }
+
+    private fun capturePrivacyWindowIds(): Set<Int> = windows.filter { it.displayId == Display.DEFAULT_DISPLAY &&
+        !ownCaptureOverlay(it) }.map { it.id }.toSet() +
+        listOfNotNull(latestSnapshot?.windowId, privacyBackdropWindowId)
+
+    private fun updateCapturePrivacyBounds() {
+        val visible = capturePrivacyWindowIds()
+        privateCaptureBounds = privateWindowBounds.filterKeys { it in visible }.values.flatten().distinct()
+    }
+
+    private fun rememberPrivacyBackdrop(windowId: Int) {
+        val window = windows.firstOrNull { it.id == windowId && it.type == AccessibilityWindowInfo.TYPE_APPLICATION } ?: return
+        val bounds = Rect().also(window::getBoundsInScreen)
+        val size = displayGeometry()
+        val viewport = if (Build.VERSION.SDK_INT >= 30) {
+            val metrics = getSystemService(WindowManager::class.java).maximumWindowMetrics
+            val insets = metrics.windowInsets.getInsetsIgnoringVisibility(android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.displayCutout())
+            Rect(metrics.bounds).apply { left += insets.left; top += insets.top; right -= insets.right; bottom -= insets.bottom }
+        } else Rect(0, 0, size.first, size.second)
+        if (bounds.contains(viewport)) privacyBackdropWindowId = windowId
+    }
+
+    /** Optional privacy metadata, never a prerequisite for visual navigation. */
+    private fun refreshVisibleCapturePrivacy(): Boolean {
+        val active = latestSnapshot?.windowId
+        val backdrop = privacyBackdropWindowId
+        var backdropReadable = backdrop == null || backdrop == active
+        for (window in windows) {
+            if (window.id == active || ownCaptureOverlay(window)) continue
+            val root = window.root
+            if (root == null) {
+                if (window.type == AccessibilityWindowInfo.TYPE_SYSTEM) {
+                    val rect = Rect().also(window::getBoundsInScreen)
+                    if (!rect.isEmpty) {
+                        privateWindowBounds[window.id] = listOf(listOf(rect.left, rect.top, rect.right, rect.bottom))
+                        privateWindowGeometry[window.id] = displayGeometry()
+                    }
+                }
+                continue
+            }
+            val regions = mutableListOf<List<Int>>()
+            val nodes = JSONArray()
+            var complete = root.isVisibleToUser
+            fun visit(node: AccessibilityNodeInfo, path: String, depth: Int) {
+                if (!node.isVisibleToUser) return
+                if (depth > 30 || nodes.length() >= 300) { complete = false; return }
+                val rect = Rect().also(node::getBoundsInScreen)
+                val labels = listOf(node.text?.toString().orEmpty(), node.contentDescription?.toString().orEmpty(),
+                    node.hintText?.toString().orEmpty(), if (Build.VERSION.SDK_INT >= 30) node.stateDescription?.toString().orEmpty() else "")
+                val inputLabel = "${labels[1]} ${labels[2]} ${node.viewIdResourceName.orEmpty()}"
+                val bounds = listOf(rect.left, rect.top, rect.right, rect.bottom)
+                if (!rect.isEmpty && (node.isPassword || node.isEditable && (Policy.codeInput(inputLabel) || Policy.phoneInput(inputLabel)) ||
+                        DeviceReadPrivacy.codeNotification("", labels.joinToString(" ")) || labels.any(LoginAssist::containsPrivateValue))) regions += bounds
+                nodes.put(JSONObject().put("id", path).put("parent_id", path.substringBeforeLast('_', ""))
+                    .put("class_name", node.className).put("resource_id", node.viewIdResourceName).put("bounds", JSONArray(bounds))
+                    .put("text", labels[0]).put("description", labels[1]).put("hint", labels[2]).put("state_description", labels[3]))
+                for (index in 0 until node.childCount) {
+                    val child = node.getChild(index)
+                    if (child == null) { complete = false; continue }
+                    try { visit(child, "${path}_$index", depth + 1) } finally { @Suppress("DEPRECATION") child.recycle() }
+                }
+            }
+            try {
+                visit(root, "n", 0)
+                if (root.packageName?.toString() == "com.android.systemui") regions += SystemUiNotificationPrivacy.find(nodes, regions).bounds
+                privateWindowBounds[window.id] = (if (complete) regions else privateWindowBounds[window.id].orEmpty() + regions).distinct()
+                if (complete) privateWindowGeometry[window.id] = displayGeometry()
+                if (window.id == backdrop && complete) backdropReadable = true
+            } finally { @Suppress("DEPRECATION") root.recycle() }
+        }
+        // A dialog can remove the covered application from Android's interactive-window list.
+        // Keep its known secret regions until a readable observation of that window replaces them.
+        updateCapturePrivacyBounds()
+        // A hidden password page may scroll/resize while its tree is unavailable. Old
+        // coordinates cannot protect its current pixels in a full-display capture.
+        return backdropReadable || privateWindowBounds[backdrop].orEmpty().isEmpty()
+    }
     fun stopActionFeedback() {
         val invalidatedGeneration = visualCaptures.stopFeedback()
-        feedback.clear(); DeviceWorkerService.instance?.stopCompanionGestureTouchPass(invalidatedGeneration)
-        mainHandler.post { guardTouchPass.clearBefore(invalidatedGeneration) }
+        feedback.clear()
+        val companion=DeviceWorkerService.instance
+        platformGestures.afterStopped {
+            companion?.stopCompanionGestureTouchPass(invalidatedGeneration)
+            mainHandler.post { guardTouchPass.clearBefore(invalidatedGeneration) }
+        }
     }
     private fun logTouchPause(source: String) {
         android.util.Log.i("DoppelTouchPause", "source=$source elapsed_ms=${android.os.SystemClock.elapsedRealtime()} generation=${actionGeneration.get()} own_injection=${ownGestureGeneration.get() >= 0}")
@@ -165,7 +349,7 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
             if (enabled && touchGuards.isNotEmpty() && companion == guardedCompanion) return@post
             if (!removeTouchGuardsImmediately()) {
                 stopActionFeedback()
-                DeviceWorkerService.instance?.takeIf { !it.isPaused }?.pause()
+                DeviceWorkerService.instance?.takeIf { !it.isPaused }?.pauseActiveRun()
                 return@post
             }
             guardedCompanion = companion
@@ -191,7 +375,7 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                     setBackgroundColor(android.graphics.Color.TRANSPARENT)
                     importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                     setOnTouchListener { _, event ->
-                        if (event.actionMasked == MotionEvent.ACTION_DOWN) { logTouchPause("guard_down"); navigationGeneration++; targetHistory.clear(); DeviceWorkerService.instance?.pause(); setTouchGuard(false) }
+                        if (event.actionMasked == MotionEvent.ACTION_DOWN) { logTouchPause("guard_down"); navigationGeneration++; targetHistory.clear(); DeviceWorkerService.instance?.pauseActiveRun(); setTouchGuard(false) }
                         true
                     }
                 }
@@ -205,8 +389,8 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                         layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
                     }
                 }
-                try { manager.addView(guard, params); touchGuards.add(guard) } catch (_: Exception) {
-                    removeTouchGuardsImmediately(); stopActionFeedback(); DeviceWorkerService.instance?.pause(); break
+                try { TemporaryScreenshotExclusion.addView(manager, guard, params); touchGuards.add(guard) } catch (_: Exception) {
+                    removeTouchGuardsImmediately(); stopActionFeedback(); DeviceWorkerService.instance?.pauseActiveRun(); break
                 }
                 }
                 guardVisible = touchGuards.isNotEmpty()
@@ -257,7 +441,9 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                 reject("layout_failed");release(owner);return@post
             }
             diagnostic.mark("layout_applied")
-            mainHandler.postDelayed({ release(owner) }, durationMs.coerceIn(3000, 6000))
+            mainHandler.postDelayed({
+                platformGestures.afterStopped { mainHandler.post { release(owner) } }
+            }, durationMs.coerceIn(3000, 60000))
             if(abandoned.get() || !isCurrent() || actionGeneration.get()!=generation || !guardTouchPass.owns(owner)) {
                 reject("stale_host");release(owner);return@post
             }
@@ -283,7 +469,9 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
         }
     }
     internal fun guardGestureTouchPassDiagnostic():JSONObject=guardPassDiagnostic.get()?.snapshot()?:JSONObject()
-    @Synchronized override fun observe(): JSONObject {
+    @Synchronized override fun observe(): JSONObject = observeScreen(false)
+    @Synchronized private fun observeVisual(): JSONObject = observeScreen(true)
+    private fun observeScreen(visual: Boolean): JSONObject {
         val executionGeneration = actionGeneration.get()
         val taskGeneration = TaskControl.currentGeneration()
         val operation = AutomaticUnlockSession.deviceOperation {
@@ -293,9 +481,33 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
         try {
         if (AutomaticUnlockSession.isUnlocking || AutomaticUnlockSession.isAuthenticating) throw ScreenNotReadyException()
         refs.clear()
+        // Capture/visual observation boundaries must not bind new pixels to cached old windows.
+        if (visual && Build.VERSION.SDK_INT >= 33) clearCache()
         val generation = navigationGeneration
-        val root = activeRoot() ?: throw ScreenNotReadyException()
+        val visualWindow = if (visual) visualWindow() else null
+        val root = if (visual) visualWindow?.root else activeRoot()
+        if (root == null) {
+            if (!visual || visualWindow == null) throw ScreenNotReadyException()
+            val pkg = visualWindowPackage(visualWindow)
+            val geometry = displayGeometry()
+            val privateUnknown = LoginAssist.sensitiveSessionActive() ||
+                privateWindowBounds[visualWindow.id].orEmpty().isNotEmpty() || visualWindow.type == AccessibilityWindowInfo.TYPE_SYSTEM
+            // Losing a tree (including opening a dialog) is not evidence that a secret disappeared.
+            updateCapturePrivacyBounds()
+            val rect = Rect().also(visualWindow::getBoundsInScreen)
+            val screenId = Policy.hash("visual|$pkg|${visualWindow.id}|$generation|$geometry|$rect")
+            latestSnapshot = TargetScreenSnapshot(screenId, pkg, visualWindow.id, generation, geometry.first, geometry.second,
+                android.os.SystemClock.elapsedRealtime(), emptyList(), false)
+            targetHistory.clear()
+            val observation = JSONObject().put("screen_id", screenId).put("package_name", pkg)
+                .put("width", geometry.first).put("height", geometry.second).put("nodes", JSONArray())
+                .put("tree_complete", false).put("tree_available", false).put("assistant_surface", pkg == packageName)
+                .put("captured_at", System.currentTimeMillis()).put("payment_consent_id", PaymentConsent(this).currentId() ?: JSONObject.NULL)
+                .put("login_credentials", JSONArray()).put("login_assist", JSONObject())
+            return ScreenCapturePrivacy.attach(observation, privateUnknown || capturePrivateScreen() || PaymentConsent.settingsVisible)
+        }
         val pkg = root.packageName?.toString().orEmpty()
+        if (pkg.isNotBlank()) windowPackages[root.windowId] = pkg
         val credentialLabels = CredentialVault(this).taskLabels(pkg)
         val privateSettings = pkg == packageName && (LoginAssist.settingsVisible || DirectMode.settingsVisible)
         val nodes = JSONArray()
@@ -384,7 +596,13 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
             }
             sensitiveBounds.addAll(notifications.bounds)
         }
-        privateCaptureBounds = sensitiveBounds.distinct()
+        privateWindowBounds[root.windowId] = if (complete && generation == navigationGeneration) sensitiveBounds.distinct()
+            else (privateWindowBounds[root.windowId].orEmpty() + sensitiveBounds).distinct()
+        if (complete && generation == navigationGeneration) {
+            privateWindowGeometry[root.windowId] = displayGeometry()
+            rememberPrivacyBackdrop(root.windowId)
+        }
+        updateCapturePrivacyBounds()
         if (shellBridgeReady()) {
             ShellBridgeIntegration.attachIme(nodes,pkg,ShellBridgeImeService.capability())
         }
@@ -397,7 +615,7 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
         val observation = JSONObject().put("screen_id", screenId)
             .put("assistant_surface", pkg == packageName)
             .put("package_name", pkg).put("width", metrics.widthPixels).put("height", metrics.heightPixels)
-            .put("nodes", nodes).put("tree_complete", snapshot.complete).put("captured_at", System.currentTimeMillis())
+            .put("nodes", nodes).put("tree_complete", snapshot.complete).put("tree_available", true).put("captured_at", System.currentTimeMillis())
             .put("payment_consent_id", paymentConsentId ?: JSONObject.NULL)
         observation.put("login_credentials", credentialLabels)
         observation.put("login_assist", LoginAssist(this).taskStatus(pkg, getSharedPreferences("doppel", MODE_PRIVATE).getString("active_run", null)))
@@ -406,22 +624,122 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
         return ScreenCapturePrivacy.attach(observation, privateSettings)
         } finally { operation.close() }
     }
-    @Synchronized override fun execute(command: JSONObject): JSONObject {
+    override fun execute(command: JSONObject): JSONObject = execute(command, TaskControl.currentGeneration())
+
+    /** Capture caller authority before waiting for another device operation; never issue a fresh ticket here. */
+    internal fun execute(command: JSONObject, taskGeneration: Long, isCurrent: () -> Boolean = { true }): JSONObject =
+        executeGuarded(command, TaskControl.captureExecutionPermit(command.getString("run_id"), taskGeneration, isCurrent))
+
+    /** Human LAN view: reuse the normal full-screen capture/privacy pipeline, never invoke a model. */
+    @Synchronized internal fun captureHandoffFrame(current: () -> Boolean): JSONObject {
+        val command = JSONObject().put("id", java.util.UUID.randomUUID().toString()).put("run_id", "lan-handoff-view")
+            .put("kind", "screenshot").put("split_agent", true)
+        val receipt = executeGuarded(command, current)
+        if (receipt.optString("status") != "ok") throw dev.doppel.sdk.companion.CompanionProtocolException(409,
+            receipt.optJSONObject("data")?.optString("reason_code")?.takeIf { it.isNotBlank() } ?: "capture_unavailable")
+        val data = receipt.getJSONObject("data")
+        val frame = data.getJSONObject("visual_frame")
+        val navigation = visualCaptures.remove(frame.getString("capture_id"))?.navigation
+            ?: throw dev.doppel.sdk.companion.CompanionProtocolException(409, "frame_changed")
+        return JSONObject().put("image_base64", data.getString("image_base64"))
+            .put("_window_id", navigation.windowId).put("_navigation_generation", navigation.navigationGeneration)
+            .put("_package_name", frame.getString("package_name")).apply {
+                for (key in listOf("display_width", "display_height", "image_width", "image_height", "rotation")) put(key, frame.get(key))
+            }
+    }
+
+    /** Human coordinates are explicit authorization; do not run them through the AI's semantic policy. */
+    @Synchronized internal fun executeHandoffAction(runId: String, frame: JSONObject, action: JSONObject,
+                                                   current: () -> Boolean): JSONObject {
+        val expected = Triple(frame.getInt("display_width"), frame.getInt("display_height"), frame.getInt("rotation"))
+        val accepting = java.util.concurrent.atomic.AtomicBoolean(true)
+        val companion = DeviceWorkerService.instance
+        val revision = companion?.companionRevision
+        val generation = actionGeneration.get()
+        fun currentHost() = current() && instance === this && !callInProgress() &&
+            actionGeneration.get() == generation && DeviceWorkerService.instance === companion && companion?.companionRevision == revision &&
+            !AutomaticUnlockSession.active && !AutomaticUnlockSession.locked(this) &&
+            !capturePrivateScreen() && !PaymentConsent.settingsVisible
+        fun permitted() = accepting.get() && currentHost()
+        fun sameFrame() = permitted() && expected == displayGeometry() &&
+            frame.getInt("_navigation_generation") == navigationGeneration &&
+            currentVisualWindowMatches(frame.getInt("_window_id"), frame.getString("_package_name"))
+        if (!sameFrame()) return JSONObject().put("status", "stale").put("reason_code", "frame_changed")
+        val kind = action.getString("kind")
+        val duration = when (kind) { "tap" -> 60L; "swipe", "long_press" -> action.getLong("duration_ms"); else -> 0L }
+        val gate = CountDownLatch(1)
+        val submitted = java.util.concurrent.atomic.AtomicBoolean(false)
+        val completed = java.util.concurrent.atomic.AtomicBoolean(false)
+        val physical = kind in setOf("tap", "swipe", "long_press")
+        val pass = if (physical) companion?.beginCompanionGestureTouchPass(generation, duration + 3000, ::permitted) else null
+        if (physical && companion != null && pass == null)
+            return JSONObject().put("status", "cancelled").put("reason_code", "touch_handoff_unavailable")
+        var guard: AutoCloseable? = null
+        try {
+            if (physical) {
+                guard = beginGuardGestureTouchPass(generation, duration + 3000, ::currentHost)
+                if (guard == null) return JSONObject().put("status", "cancelled").put("reason_code", "touch_handoff_unavailable")
+            }
+            mainHandler.post {
+                try {
+                    if (!accepting.get() || !sameFrame()) { gate.countDown(); return@post }
+                    if (physical) {
+                        fun x(key: String) = (action.getDouble(key) * (expected.first - 1)).toFloat()
+                        fun y(key: String) = (action.getDouble(key) * (expected.second - 1)).toFloat()
+                        val path = Path().apply {
+                            moveTo(x("x"), y("y"))
+                            if (kind == "swipe") lineTo(x("end_x"), y("end_y"))
+                        }
+                        val description = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, duration)).build()
+                        submitted.set(dispatchTrackedGesture(runId, description, object : GestureResultCallback() {
+                            override fun onCompleted(gestureDescription: GestureDescription?) { completed.set(true); gate.countDown() }
+                            override fun onCancelled(gestureDescription: GestureDescription?) { gate.countDown() }
+                        }, mainHandler) { accepting.get() && sameFrame() })
+                        if (!submitted.get()) gate.countDown()
+                    } else {
+                        val accepted = if (kind == "type") {
+                            val root = activeRoot()
+                            val editor = root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                            try {
+                                editor?.isEditable == true && editor.isEnabled && sameFrame() && editor.performAction(
+                                    AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
+                                        putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, action.getString("text"))
+                                    })
+                            } finally {
+                                @Suppress("DEPRECATION") editor?.recycle()
+                                @Suppress("DEPRECATION") root?.recycle()
+                            }
+                        } else DeviceEnvironment.globalActions[kind]?.let { sameFrame() && performGlobalAction(it) } == true
+                        submitted.set(accepted); completed.set(accepted); gate.countDown()
+                    }
+                } catch (_: Exception) { gate.countDown() }
+            }
+            val returned = gate.await(duration + 2000, TimeUnit.MILLISECONDS)
+            return JSONObject().put("status", when {
+                returned && completed.get() -> "ok"
+                submitted.get() -> "unconfirmed"
+                !currentHost() -> "cancelled"
+                else -> "error"
+            })
+        } finally { accepting.set(false); guard?.close(); pass?.close() }
+    }
+
+    private class Execution(val generation: Long, val current: () -> Boolean)
+
+    @Synchronized private fun executeGuarded(command: JSONObject, current: () -> Boolean): JSONObject {
         fun result(status: String, message: String = "", observation: JSONObject? = null, data: JSONObject = JSONObject()) =
             JSONObject().put("command_id", command.getString("id")).put("run_id", command.getString("run_id"))
                 .put("status", status).put("message", message).put("observation", observation ?: JSONObject.NULL)
                 .put("data", data.apply { if (observation != null) put("scroll_directions", scrollDirections(observation)) })
         try {
-            val executionGeneration = actionGeneration.get()
-            val taskGeneration = TaskControl.currentGeneration()
+            val executionGeneration = Execution(actionGeneration.get(), current)
             val operation = AutomaticUnlockSession.deviceOperation {
-                actionGeneration.get() == executionGeneration && TaskControl.isCurrent(taskGeneration) &&
-                    instance === this && !Thread.currentThread().isInterrupted
-            } ?: return result("cancelled", "执行已暂停")
+                !readInterrupted(executionGeneration)
+            } ?: return result("cancelled", "执行已暂停，动作未派发")
             operation.use {
             val readiness = ScreenReadyWait(android.os.SystemClock::elapsedRealtime, Thread::sleep,
                 { readInterrupted(executionGeneration) }, if (command.optBoolean("split_agent")) 2000 else 5000)
-            val kind = command.getString("kind")
+            val kind = command.getString("kind").let { if (it == "pay") "tap" else it }
             if (callInProgress()) {
                 stopActionFeedback(); setTouchGuard(false); targetHistory.clear()
                 return result("blocked", InterruptionPolicy.message("call"), data = JSONObject().put("human_takeover", "interruption").put("interruption", "call"))
@@ -442,18 +760,18 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                 val query = command.opt("query") as? String ?: ""
                 if (query.length > 120) return result("error", "应用查询内容过长")
                 val apps = DeviceEnvironment.launchableApps(this, query)
-                if (readInterrupted(executionGeneration) || !TaskControl.isCurrent(taskGeneration)) return result("cancelled", "读取应用列表已中断")
+                if (readInterrupted(executionGeneration)) return result("cancelled", "读取应用列表已中断")
                 return result("ok", "已读取可启动应用", data = apps)
             }
             if (kind in SplitAgentProtocol.readActions) {
                 val read = DeviceReadTools.execute(this, kind, command) {
-                    !readInterrupted(executionGeneration) && TaskControl.isCurrent(taskGeneration)
+                    !readInterrupted(executionGeneration)
                 }
                 return result(read.optString("status", "error"), read.optString("message"),
                     data = read.optJSONObject("data") ?: JSONObject())
             }
             if (kind == "observe") {
-                val observation = readiness.read(::observe)
+                val observation = readiness.read { if (command.optBoolean("include_screenshot")) observeVisual() else observe() }
                 val omitPrivateScreenshot = command.optBoolean("include_screenshot") && ScreenCapturePrivacy.unavailable(observation)
                 if (command.optBoolean("include_screenshot") && !omitPrivateScreenshot) {
                     val shot = screenshot(command, readiness, executionGeneration)
@@ -489,20 +807,22 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
             if (kind == "wait") {
                 val end = android.os.SystemClock.elapsedRealtime() + command.optLong("duration_ms", 500).coerceIn(0, 30000)
                 while (android.os.SystemClock.elapsedRealtime() < end) {
-                    if (actionGeneration.get() != executionGeneration || callInProgress()) return result("cancelled", "等待已中断")
+                    if (readInterrupted(executionGeneration) || callInProgress()) return result("cancelled", "等待已中断")
                     Thread.sleep(minOf(100, end - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(1))
                 }
                 return result("ok", observation = if(command.optBoolean("split_agent")) null else readiness.read(::observe))
             }
-            val mutation = kind in setOf("tap", "long_press", "type", "login_phone", "login_code", "login_password", "ime_action", "scroll", "back", "home", "menu", "launch", "open_document", "visual_gesture", "split_action") || kind in DeviceEnvironment.globalActions || kind in SplitAgentProtocol.nativeActions
+            val mutation = kind in setOf("tap", "long_press", "type", "login_phone", "login_code", "login_username", "login_password", "ime_action", "scroll", "back", "home", "menu", "launch", "open_document", "visual_gesture", "split_action") || kind in DeviceEnvironment.globalActions || kind in SplitAgentProtocol.nativeActions
             // Protected settings may have no readable accessibility root at all.
             if (mutation && PaymentConsent.settingsVisible) {
                 stopActionFeedback(); setTouchGuard(false); targetHistory.clear()
                 return result("blocked", "付款授权只能由用户在设置中手动更改", data = JSONObject().put("human_takeover", "payment"))
             }
-            val current = if (mutation) observe() else null
+            val visualCommand = kind in setOf("split_action", "visual_gesture") || kind in SplitAgentProtocol.nativeActions
+            val current = if (mutation) { if (visualCommand) observeVisual() else observe() } else null
             if (current != null) {
-                if ((LoginAssist.settingsVisible || DirectMode.settingsVisible) && current.optString("package_name") == packageName) {
+                if (ScreenCapturePrivacy.unavailable(current) ||
+                    (LoginAssist.settingsVisible || DirectMode.settingsVisible) && current.optString("package_name") == packageName) {
                     stopActionFeedback(); setTouchGuard(false); targetHistory.clear()
                     return result("blocked", "本机登录资料只能由用户编辑", current, JSONObject().put("human_takeover", "login"))
                 }
@@ -518,7 +838,10 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                         Policy.verificationLabel(label, node.optBoolean("clickable") || node.optBoolean("long_clickable") || node.optBoolean("editable"))
                     }
                 }
-                if (verification) {
+                val loginPermit = command.optString("login_verification_permit")
+                val allowedLoginVerification = kind == "split_action" && loginPermit.isNotBlank() &&
+                    DirectRuntime.allowsLoginVerification(this, command.getString("run_id"), current.optString("package_name"), loginPermit)
+                if (verification && !allowedLoginVerification || loginPermit.isNotBlank() && !allowedLoginVerification) {
                     stopActionFeedback(); setTouchGuard(false); targetHistory.clear()
                     return result("blocked", "安全验证需要人工完成，请完成后明确继续", current, JSONObject().put("human_takeover", "verification"))
                 }
@@ -529,7 +852,7 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                 }
             }
             if (kind == "visual_gesture") return executeVisualGesture(command, current!!, executionGeneration, readiness)
-            if (kind in setOf("tap", "long_press", "type", "login_phone", "login_code", "login_password", "ime_action", "scroll")) {
+            if (kind in setOf("tap", "long_press", "type", "login_phone", "login_code", "login_username", "login_password", "ime_action", "scroll")) {
                 val fresh = current!!
                 val reference = command.optString("target")
                 val loginTargets = if (kind in setOf("login_phone", "login_code")) refs.filterValues { candidate ->
@@ -538,10 +861,12 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                         if (kind == "login_phone") Policy.phoneInput(label) else Policy.codeInput(label)
                 } else emptyMap()
                 val resolved = if (reference.isNotEmpty() && reference != "null") reference else if (kind == "scroll") refs.entries.firstOrNull { it.value.isScrollable }?.key.orEmpty()
-                    else if (kind == "login_password") refs.entries.filter { it.value.isFocused && it.value.isPassword && it.value.isEditable }.singleOrNull()?.key.orEmpty()
+                    else if (kind in setOf("login_username", "login_password")) refs.entries.filter {
+                        it.value.isFocused && it.value.isPassword == (kind == "login_password") && it.value.isEditable
+                    }.singleOrNull()?.key.orEmpty()
                     else loginTargets.entries.singleOrNull { it.value.isFocused }?.key ?: loginTargets.entries.singleOrNull()?.key.orEmpty()
                 val node = refs[resolved]
-                if (kind == "login_password" && node == null) return result("error", "请先点击当前应用的登录密码输入框，再请求填写已授权资料", fresh)
+                if (kind in setOf("login_username", "login_password") && node == null) return result("error", "请先点击当前应用对应的账号或密码输入框，再请求填写已授权资料", fresh)
                 if (kind in setOf("login_phone", "login_code") && node == null) return result("error", "未找到唯一的对应登录输入框，请先聚焦手机号或验证码输入框", fresh)
                 fun labels(targetNode: AccessibilityNodeInfo, depth: Int = 0): String {
                     if (depth > 4 || targetNode.isPassword) return ""
@@ -561,39 +886,33 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                 val target = node?.let { Target(if (kind == "scroll") "" else labels(it) + " " + ancestorLabels.joinToString(" ") +
                     if (kind == "login_code") " ${it.hintText?.toString().orEmpty()} ${it.viewIdResourceName.orEmpty()}" else "",
                     it.isPassword || ancestorPassword, it.isEnabled) }
-                val nodes = fresh.getJSONArray("nodes")
-                val visibleLabels = (0 until nodes.length()).map { nodes.getJSONObject(it).optString("text") + " " + nodes.getJSONObject(it).optString("description") }
-                val paymentAction = kind != "scroll" && Policy.paymentTarget(target?.label.orEmpty(), visibleLabels)
+                val paymentAction = command.optString("kind") == "pay"
                 val consentId = command.optString("payment_consent_id").takeIf { it.isNotBlank() && it != "null" }
-                val paymentAuthorized = kind == "tap" && consentId != null && consentId == PaymentConsent(this).currentId()
-                val financialCredentialInput = refs.values.any { item ->
-                    item.isEditable && (item.isPassword || Policy.financialCredential("${item.hintText?.toString().orEmpty()} ${item.contentDescription?.toString().orEmpty()} ${item.viewIdResourceName.orEmpty()}"))
-                }
-                if (kind != "scroll" && Policy.manualFinancialContext(visibleLabels, financialCredentialInput) && !(kind == "tap" && Policy.leavesFinancialScreen(target?.label.orEmpty())))
-                    return result("blocked", "支付验证、转账及长期扣款授权需由用户操作", fresh, JSONObject().put("human_takeover", "payment"))
-                if ((paymentAction && !paymentAuthorized) || (consentId != null && !paymentAction))
-                    return result("blocked", "付款授权未开启、已撤销或与当前操作不匹配", fresh, JSONObject().put("human_takeover", "payment"))
+                val paymentAuthorized = consentId != null && consentId == PaymentConsent(this).currentId()
+                if (consentId != null && !paymentAction || paymentAction && !Policy.canPay(command.optString("mode"), paymentAuthorized, fresh.optString("package_name")))
+                    return result("blocked", "付款需要完全访问模式及当前有效的支付授权", fresh, JSONObject().put("human_takeover", "payment"))
                 val snapshot = latestSnapshot
                 if (snapshot == null || snapshot.navigationGeneration != navigationGeneration) return result("stale", "页面导航已变化，请重新观察", fresh)
                 val expected = command.optString("screen_id")
                 val privateInputLabel = "${node?.hintText?.toString().orEmpty()} ${node?.contentDescription?.toString().orEmpty()} ${node?.viewIdResourceName.orEmpty()}"
                 val privateInput = node != null && (node.isPassword || Policy.codeInput(privateInputLabel) || Policy.phoneInput(privateInputLabel))
                 val stable = kind !in SplitAgentProtocol.loginActions && !paymentAction && consentId == null && expected != snapshot.screenId && !(kind == "type" && privateInput) && targetHistory.revalidates(expected, snapshot, resolved, kind)
-                val verdict = Policy.validate(if (kind == "ime_action") "type" else kind, if (stable) snapshot.screenId else expected, snapshot.screenId, target, paymentAuthorized = paymentAuthorized)
+                val verdict = Policy.validate(if (kind == "ime_action") "type" else kind, if (stable) snapshot.screenId else expected, snapshot.screenId, target, command.optString("mode", "assist"))
                 if (verdict != "ok") return result(verdict, if (verdict == "stale") "页面或目标已变化，请重新观察" else "支付或敏感输入必须由用户接管", fresh)
-                val input = kind in setOf("type", "login_phone", "login_code", "login_password")
+                val input = kind in setOf("type", "login_phone", "login_code", "login_username", "login_password")
                 if (input && (!node!!.isEditable || kind == "type" && command.optString("text").length > 8000)) return result("blocked", "输入目标无效", fresh)
                 if (kind == "long_press" && !node!!.isLongClickable) return result("blocked", "目标不支持长按", fresh)
                 if (kind == "scroll" && (!node!!.isScrollable || command.optString("direction") !in setOf("up", "down", "left", "right"))) return result("blocked", "滚动目标或方向无效", fresh)
                 val scrollAction = if (kind == "scroll") ScrollCapabilities.action(command.optString("direction"), node!!.actionList.map { it.id }.toSet()) else null
                 if (kind == "scroll" && scrollAction == null) return result("ok", "未执行滚动：当前控件不支持该方向", fresh,
                     JSONObject().put("no_op", true).put("action_state", "direction_unavailable"))
-                if (kind in setOf("login_phone", "login_code", "login_password") && (command.optString("package_name") != fresh.getString("package_name") || !command.isNull("text"))) return result("blocked", "登录目标应用不匹配", fresh, JSONObject().put("human_takeover", "login"))
+                if (kind in SplitAgentProtocol.loginActions && (command.optString("package_name") != fresh.getString("package_name") || !command.isNull("text"))) return result("blocked", "登录目标应用不匹配", fresh, JSONObject().put("human_takeover", "login"))
                 val inputLabel = "${node!!.hintText?.toString().orEmpty()} ${node.contentDescription?.toString().orEmpty()} ${node.viewIdResourceName.orEmpty()}"
                 if (kind == "login_code" && !Policy.codeInput(inputLabel) || kind == "login_phone" && !Policy.phoneInput(inputLabel))
                     return result("blocked", "目标未标识为对应的登录输入框，请人工填写", fresh, JSONObject().put("human_takeover", "login"))
-                if (kind == "login_password" && (!node.isPassword || command.optString("credential_label").isBlank()))
-                    return result("blocked", "请选择已授权的资料和登录密码输入框", fresh, JSONObject().put("human_takeover", "login"))
+                if (kind in setOf("login_username", "login_password") &&
+                    (node.isPassword != (kind == "login_password") || !node.isFocused || command.optString("credential_label").isBlank()))
+                    return result("blocked", "请选择已授权的资料并聚焦对应账号或密码输入框", fresh, JSONObject().put("human_takeover", "login"))
                 if (kind == "ime_action") {
                     val ime = ShellBridgeImeService.capability()
                     if (!shellBridgeReady() || !node.isEditable || !node.isFocused || privateInput || Policy.financialCredential(inputLabel) ||
@@ -608,21 +927,22 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                 val bounds = Rect().also { node!!.getBoundsInScreen(it) }
                 val geometry = ActionFeedbackGeometry.create(kind, listOf(bounds.left, bounds.top, bounds.right, bounds.bottom), fresh.getInt("width"), fresh.getInt("height"), command.optString("direction"))
                     ?: return result("stale", "目标不在可见屏幕内，请重新观察", fresh)
-                if (actionGeneration.get() != executionGeneration) return result("cancelled", "执行已暂停", fresh)
-                if (kind == "login_password") {
-                    val filled = CredentialVault(this).fillForTask(fresh.getString("package_name"), command.getString("credential_label"), node) {
+                if (readInterrupted(executionGeneration)) return result("cancelled", "执行已暂停", fresh)
+                if (kind in setOf("login_username", "login_password")) {
+                    val filled = CredentialVault(this).fillForTask(fresh.getString("package_name"), command.getString("credential_label"), node,
+                        if (kind == "login_username") "username" else "password") {
                         DeviceWorkerService.instance?.allowsCredentialInput(command.getString("run_id")) == true &&
                             !readInterrupted(executionGeneration) && !DirectMode.settingsVisible && !LoginAssist.settingsVisible &&
                             snapshot.navigationGeneration == navigationGeneration && foregroundPackage() == fresh.getString("package_name")
                     }
                     targetHistory.clear()
-                    return if (filled) result("ok", "已在本机填写授权登录密码，请核对登录结果", settledObservation(executionGeneration), JSONObject().put("action_state", "accepted"))
-                        else result("blocked", "当前任务、应用或密码资料未获填写授权，请检查密码管理设置", fresh, JSONObject().put("human_takeover", "login"))
+                    return if (filled) result("ok", "已在本机填写授权登录资料，请核对登录结果", settledObservation(executionGeneration), JSONObject().put("action_state", "accepted"))
+                        else result("blocked", "当前任务、应用或密码资料未获填写授权，请检查登录设置", fresh, JSONObject().put("human_takeover", "login"))
                 }
                 fun loginAllowed(): Boolean {
                     val keyguard = getSystemService(android.app.KeyguardManager::class.java)
                     return DeviceWorkerService.instance?.allowsCredentialInput(command.getString("run_id")) == true &&
-                        !readInterrupted(executionGeneration) && TaskControl.isCurrent(taskGeneration) && !keyguard.isKeyguardLocked && !keyguard.isDeviceLocked &&
+                        !readInterrupted(executionGeneration) && !keyguard.isKeyguardLocked && !keyguard.isDeviceLocked &&
                         !DirectMode.settingsVisible && !LoginAssist.settingsVisible && snapshot.navigationGeneration == navigationGeneration &&
                         foregroundPackage() == fresh.getString("package_name") && node.refresh() && node.isEditable && node.isVisibleToUser && node.isEnabled &&
                         node.packageName?.toString() == fresh.getString("package_name")
@@ -630,7 +950,9 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                 val inputText = if (kind in setOf("login_phone", "login_code")) {
                     if (!loginAllowed()) return result("blocked", "当前任务或设备状态不允许填写登录资料", fresh, JSONObject().put("human_takeover", "login"))
                     val login = LoginAssist(this)
-                    val value = runCatching { login.valueFor(kind, fresh.getString("package_name"), command.getString("run_id")) }.getOrNull()
+                    val candidate = (command.opt("code_candidate_id") as? String)?.takeIf { it.isNotBlank() }
+                    val value = runCatching { login.valueFor(kind, fresh.getString("package_name"), command.getString("run_id"), candidate,
+                        startCodeSession = !command.optBoolean("split_agent")) }.getOrNull()
                     if (value == null) {
                         val state = login.taskStatus(fresh.getString("package_name"), command.getString("run_id"))
                         val waiting = kind == "login_code" && state.optBoolean("enabled") && state.optBoolean("notification_access") && state.optBoolean("session_started") && state.optString("code_state") == "waiting"
@@ -639,7 +961,7 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                     }
                     value
                 } else command.optString("text")
-                if (actionGeneration.get() != executionGeneration) return result("cancelled", "执行已暂停", fresh)
+                if (readInterrupted(executionGeneration)) return result("cancelled", "执行已暂停", fresh)
                 if (snapshot.navigationGeneration != navigationGeneration) return result("stale", "页面导航已变化，请重新观察", observe())
                 if (kind in setOf("login_phone", "login_code") && !loginAllowed()) return result("cancelled", "登录填写已中断", fresh)
                 if (kind == "tap") {
@@ -661,7 +983,7 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                     // Without a trustworthy order ID, label/amount/resource changes cannot justify another charge.
                     val fingerprint = Policy.hash(fresh.getString("package_name"))
                     PaymentConsent(this).runPayment(consentId!!, command.getString("run_id"), fingerprint) {
-                        actionGeneration.get() == executionGeneration && snapshot.navigationGeneration == navigationGeneration &&
+                        !readInterrupted(executionGeneration) && snapshot.navigationGeneration == navigationGeneration &&
                             node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                     }
                 } else null
@@ -674,6 +996,7 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                     }
                     return result("blocked", message, fresh, JSONObject().put("human_takeover", "payment").put("payment_guard", paymentAttempt.status))
                 }
+                if (paymentAttempt == null && readInterrupted(executionGeneration)) return result("cancelled", "执行已暂停，动作未派发", fresh)
                 val acted = when(kind) {
                     "tap" -> paymentAttempt?.accepted ?: node!!.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                     "long_press" -> node!!.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
@@ -716,7 +1039,7 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                 }
                 return result(if (acted) "ok" else if (paymentAttempt != null) "blocked" else "error", if (acted) "系统已接受操作，请检查后续屏幕" else if (paymentAttempt != null) "付款结果未确认，请核对订单后手动处理" else "控件未执行操作", settledObservation(executionGeneration), actionData)
             }
-            if (mutation && actionGeneration.get() != executionGeneration) return result("cancelled", "执行已暂停", current)
+            if (mutation && readInterrupted(executionGeneration)) return result("cancelled", "执行已暂停", current)
             if (kind in SplitAgentProtocol.nativeActions) {
                 if (command.optBoolean("split_agent")) {
                     val capture = visualCaptures.remove(command.optJSONObject("source")?.optString("capture_id").orEmpty())
@@ -726,7 +1049,7 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                             JSONObject().put("action_state", "not_dispatched").put("reason_code", "source_navigation_changed"))
                 } else if (command.optString("screen_id").isBlank() || command.optString("screen_id") != current?.optString("screen_id"))
                     return result("stale", "系统操作前页面已变化，请重新观察", current, JSONObject().put("action_state", "not_dispatched"))
-                if (readInterrupted(executionGeneration) || !TaskControl.isCurrent(taskGeneration)) return result("cancelled", "系统操作已中断", current)
+                if (readInterrupted(executionGeneration)) return result("cancelled", "系统操作已中断", current)
             }
             targetHistory.clear()
             if (!command.optBoolean("split_agent") && kind in setOf("back", "home", "recents", "menu") && shellBridgeReady() && current != null) {
@@ -739,6 +1062,7 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
             DeviceEnvironment.globalActions[kind]?.let { action ->
                 if (Build.VERSION.SDK_INT >= 30 && systemActions.none { it.id == action }) return result("error", "本机未提供此系统动作", current,
                     JSONObject().put("action_state", "not_dispatched").put("reason_code", "system_action_unavailable"))
+                if (readInterrupted(executionGeneration)) return result("cancelled", "系统操作已中断", current)
                 val accepted = performGlobalAction(action)
                 feedback.message(DeviceEnvironment.actionLabel(kind) + if (accepted) "" else "未成功")
                 val data = JSONObject().put("action_state", if (accepted) "accepted" else "not_dispatched")
@@ -746,14 +1070,14 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                 val receipt = result(if (accepted) "ok" else "error", if (kind == "system_screenshot")
                     "系统截图请求已提交，请检查系统缩略图或保存通知；这不是模型观察截图" else DeviceEnvironment.actionLabel(kind),
                     if (command.optBoolean("split_agent")) null else settledObservation(executionGeneration), data)
-                PostActionDelay.apply(receipt, android.os.SystemClock::elapsedRealtime, Thread::sleep) { readInterrupted(executionGeneration) || !TaskControl.isCurrent(taskGeneration) }
+                PostActionDelay.apply(receipt, android.os.SystemClock::elapsedRealtime, Thread::sleep) { readInterrupted(executionGeneration) }
                 return receipt
             }
             when(kind) {
                 "volume", "adjust_volume" -> {
-                    val changed = DeviceEnvironment.volume(this, command) { !readInterrupted(executionGeneration) && TaskControl.isCurrent(taskGeneration) }
+                    val changed = DeviceEnvironment.volume(this, command) { !readInterrupted(executionGeneration) }
                     val receipt = result(changed.getString("status"), changed.getString("message"), data = changed.getJSONObject("data"))
-                    PostActionDelay.apply(receipt, android.os.SystemClock::elapsedRealtime, Thread::sleep) { readInterrupted(executionGeneration) || !TaskControl.isCurrent(taskGeneration) }
+                    PostActionDelay.apply(receipt, android.os.SystemClock::elapsedRealtime, Thread::sleep) { readInterrupted(executionGeneration) }
                     return receipt
                 }
                 "copy", "cut", "paste" -> {
@@ -772,6 +1096,7 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                         if (selection == "all" && raw.isEmpty()) return result("error", "当前没有可选择的文字", current)
                         // TextView may return false for an already-current selection, for example
                         // when cut follows copy. Verify the actual range instead of requiring a change.
+                        if (readInterrupted(executionGeneration)) return result("cancelled", "文本操作已中断", current)
                         if (selection == "all" && (node.textSelectionStart != 0 || node.textSelectionEnd != raw.length))
                             node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, Bundle().apply {
                                 putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0); putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, raw.length)
@@ -781,13 +1106,13 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                         if (selection == "all" && (node.text?.toString() != raw || node.textSelectionStart != 0 || node.textSelectionEnd != raw.length))
                             return result("error", "当前控件未确认全选文字，请重新观察后选择", current)
                     }
-                    if (readInterrupted(executionGeneration) || !TaskControl.isCurrent(taskGeneration) || !node.refresh() || !node.isFocused)
+                    if (readInterrupted(executionGeneration) || !node.refresh() || !node.isFocused)
                         return result("cancelled", "文本操作已中断或焦点已改变", current)
                     if (node.isPassword || node.actionList.none { it.id == requestedAction })
                         return result("error", "当前控件没有提供所需文本操作，请通过页面处理", current, JSONObject().put("action_state", "not_dispatched"))
                     val accepted = node.performAction(requestedAction)
                     val receipt = result(if (accepted) "ok" else "error", if (accepted) "系统已接受文本操作，请核对结果" else "控件未执行文本操作", data = JSONObject().put("action_state", if (accepted) "accepted" else "not_dispatched"))
-                    PostActionDelay.apply(receipt, android.os.SystemClock::elapsedRealtime, Thread::sleep) { readInterrupted(executionGeneration) || !TaskControl.isCurrent(taskGeneration) }
+                    PostActionDelay.apply(receipt, android.os.SystemClock::elapsedRealtime, Thread::sleep) { readInterrupted(executionGeneration) }
                     return receipt
                 }
                 "launch" -> {
@@ -797,24 +1122,26 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                         return result("error", "应用包名无效", current, data.put("reason_code", "app_unavailable"))
                     val launchIntent = packageManager.getLaunchIntentForPackage(targetPackage)
                         ?: return result("error", "应用未安装或不可启动，请重新查询应用列表", current, data.put("reason_code", "app_unavailable"))
-                    if (readInterrupted(executionGeneration) || !TaskControl.isCurrent(taskGeneration)) return result("cancelled", "启动应用已中断", current, data)
+                    if (readInterrupted(executionGeneration)) return result("cancelled", "启动应用已中断", current, data)
                     try { startActivity(launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
                     catch (_: android.content.ActivityNotFoundException) { return result("error", "应用未安装或不可启动", current, data.put("reason_code", "app_unavailable")) }
                     catch (_: SecurityException) { return result("error", "系统未允许打开此应用", current, data.put("reason_code", "app_unavailable")) }
                     targetHistory.clear(); visualCaptures.clear()
                     val receipt = result("ok", "启动请求已提交，请依据新截图确认应用已打开", data = data.put("action_state", "accepted"))
                     PostActionDelay.apply(receipt, android.os.SystemClock::elapsedRealtime, Thread::sleep) {
-                        readInterrupted(executionGeneration) || !TaskControl.isCurrent(taskGeneration)
+                        readInterrupted(executionGeneration)
                     }
                     return receipt
                 }
                 "open_document" -> {
                     val uri = android.net.Uri.parse(command.optString("uri"))
                     val receiver = command.optString("package_name").takeIf { it.isNotBlank() && it != "null" }
-                    if (uri.scheme == "doppel-document") { Gateway(this).openDocument(uri.toString(), receiver); return result("ok", "已请求打开文档副本", settledObservation(executionGeneration)) }
+                    if (readInterrupted(executionGeneration)) return result("cancelled", "打开文档已中断", current)
+                    if (uri.scheme == "doppel-document") { Gateway(this).openDocument(uri.toString(), receiver) { !readInterrupted(executionGeneration) }; return result("ok", "已请求打开文档副本", settledObservation(executionGeneration)) }
                     if (uri.scheme != "content" || contentResolver.persistedUriPermissions.none { it.uri == uri && it.isReadPermission }) return result("blocked", "文档需要用户通过系统选择器授权")
                     val intent = Intent(Intent.ACTION_VIEW).setDataAndType(uri, contentResolver.getType(uri)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     if (receiver != null) { intent.setPackage(receiver); if (intent.resolveActivity(packageManager) == null) return result("error", "指定应用不可打开此文档") }
+                    if (readInterrupted(executionGeneration)) return result("cancelled", "打开文档已中断", current)
                     startActivity(intent)
                     return result("ok", "已请求打开授权文档", settledObservation(executionGeneration))
                 }
@@ -844,12 +1171,14 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
         }
     }
     /** A or B supplies coordinates. The host reports injection facts; A judges outcomes from the next image. */
-    private fun executeSplitAction(command: JSONObject, current: JSONObject, executionGeneration: Long): JSONObject {
+    private fun executeSplitAction(command: JSONObject, current: JSONObject, executionGeneration: Execution): JSONObject {
         val started = android.os.SystemClock.elapsedRealtime()
         val data = JSONObject().put("action_state", "not_dispatched").put("completed_strokes", 0).put("feedback_enabled", true)
         fun result(status: String, message: String) = JSONObject().put("command_id",command.getString("id"))
             .put("run_id",command.getString("run_id")).put("status",status).put("message",message)
-            .put("observation",current).put("data",data.put("elapsed_ms",android.os.SystemClock.elapsedRealtime()-started))
+            .put("observation",current).put("data",data.apply {
+                if (status == "stale" && !has("reason_code")) put("reason_code", "gesture_context_changed")
+            }.put("elapsed_ms",android.os.SystemClock.elapsedRealtime()-started))
         val requested = command.getJSONObject("action")
         val action = SplitAgentProtocol.grounding(requested,requested.getString("action"))
         val kind = action.getString("action")
@@ -872,10 +1201,12 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
             data.put("reason_code","source_geometry_or_app_changed")
             return result("stale","截图之后应用或屏幕方向已改变，请重新观察")
         }
-        fun live() = !readInterrupted(executionGeneration) && instance===this && !callInProgress()
+        fun live() = !readInterrupted(executionGeneration) && instance===this && !callInProgress() &&
+            (command.optString("login_verification_permit").isBlank() || DirectRuntime.allowsLoginVerification(this,
+                command.getString("run_id"), pkg, command.optString("login_verification_permit")))
         fun sameNavigation() = anchor!=null && anchor.screenId==sourceCapture?.frame?.screenId &&
             anchor.navigationGeneration==navigationGeneration && anchor.windowId==latestSnapshot?.windowId
-        fun sameScreen() = live() && sameNavigation() && displayGeometry()==dimensions && foregroundPackage()==pkg
+        fun sameScreen() = live() && sameNavigation() && displayGeometry()==dimensions && currentVisualWindowMatches(anchor?.windowId,pkg)
         if(!live()) return result("cancelled","执行已暂停，动作未派发")
         if(!sameNavigation()) {
             data.put("reason_code","source_navigation_changed")
@@ -884,19 +1215,12 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
         // No extra capture, pixel threshold or pixel-verification expiry before gestures.
         // Continuous animation and flat targets must not veto model-selected coordinates.
         data.put("visual_verification",JSONObject().put("performed",false).put("reason","action_pixel_check_disabled"))
-        // Use the current native observation for existing authorization checks.
-        val nodes=current.getJSONArray("nodes")
-        val labels=(0 until nodes.length()).map {nodes.getJSONObject(it).let {n -> n.optString("text")+" "+n.optString("description")}}
-        val target=requested.optString("target")
-        val sensitive=refs.values.any {it.isPassword && it.isEditable}
-        val leaves=kind in setOf("back","home","recents") || Policy.leavesFinancialScreen(target)
-        if(!leaves && (Policy.manualFinancial(target) || Policy.manualFinancialContext(labels,sensitive))) {
-            data.put("human_takeover","payment");return result("blocked","支付验证、转账及长期扣款授权需由用户操作")
-        }
-        val payment=!leaves && Policy.paymentTarget(target,labels)
-        val consentId=command.optString("payment_consent_id").takeIf {it.isNotBlank() && it!="null"}
-        if(payment && (kind!="tap" || consentId==null || consentId!=PaymentConsent(this).currentId())) {
-            data.put("human_takeover","payment");return result("blocked","付款授权未开启或已撤销，请手动处理")
+        val payment = command.optJSONObject("semantic_intent")?.optString("action") == "pay"
+        val consentId = command.optString("payment_consent_id").takeIf { it.isNotBlank() && it != "null" }
+        val paymentAuthorized = consentId != null && consentId == PaymentConsent(this).currentId()
+        if (consentId != null && !payment || payment && (kind != "tap" || !Policy.canPay(command.optString("mode"), paymentAuthorized, pkg))) {
+            data.put("human_takeover", "payment")
+            return result("blocked", "付款需要完全访问模式及当前有效的支付授权")
         }
         if(kind=="type" || kind=="enter") {
             val node=refs.values.firstOrNull {it.isFocused && it.isEditable}
@@ -922,17 +1246,24 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
             feedback.message(DeviceEnvironment.actionLabel(kind))
             return result(if(accepted) "ok" else "error","系统操作已返回，请依据新截图核对")
         }
-        val plan=GestureSequencePlan.from(action,dimensions.first,dimensions.second)
+        val requestedPlan=GestureSequencePlan.from(action,dimensions.first,dimensions.second)
+        val plan=requestedPlan.copy(strokes=requestedPlan.strokes.map { stroke ->
+            if(stroke.startHoldMs==0L) stroke else {
+                val hold=maxOf(stroke.startHoldMs,android.view.ViewConfiguration.getLongPressTimeout().toLong()+100)
+                require(hold<=3000) { "设备长按阈值超过拖动支持范围" }
+                stroke.copy(startHoldMs=hold)
+            }
+        })
         require(plan.strokes.isNotEmpty())
         val companion=DeviceWorkerService.instance
         val revision=companion?.companionRevision
         fun currentHost()=live() && DeviceWorkerService.instance===companion && companion?.companionRevision==revision
-        val pass=companion?.beginCompanionGestureTouchPass(executionGeneration,plan.totalMs+5000,::currentHost)
+        val pass=companion?.beginCompanionGestureTouchPass(executionGeneration.generation,plan.totalMs+5000,::currentHost)
         companion?.companionGestureTouchPassDiagnostic()?.let {data.put("touch_handoff",it)}
         if(companion!=null && pass==null) return result("cancelled","助手触区未能让出，动作未派发")
         var guard:AutoCloseable?=null
         try {
-            guard=beginGuardGestureTouchPass(executionGeneration,plan.totalMs+5000,::currentHost)
+            guard=beginGuardGestureTouchPass(executionGeneration.generation,plan.totalMs+5000,::currentHost)
             data.put("guard_handoff",guardGestureTouchPassDiagnostic())
             if(guard==null) return result("cancelled","触屏暂停层未能让出，动作未派发")
             targetHistory.clear();visualCaptures.clear()
@@ -942,6 +1273,10 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                 val confirmed=java.util.concurrent.atomic.AtomicBoolean()
                 val expired=java.util.concurrent.atomic.AtomicBoolean()
                 val tokens=java.util.concurrent.CopyOnWriteArrayList<Long>()
+                val loginRequest=java.util.concurrent.atomic.AtomicReference<String?>()
+                val held=strokes.singleOrNull()?.takeIf {it.startHoldMs>0}
+                require(held!=null || strokes.none {it.startHoldMs>0})
+                var heldPath:Path?=null
                 var offset=0L
                 val description=GestureDescription.Builder()
                 strokes.forEach {stroke ->
@@ -959,7 +1294,8 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                         ).map { FeedbackPoint(it.x, it.y) }
                     } else stroke.points
                     val path=Path().apply {moveTo(pathPoints.first().x,pathPoints.first().y);pathPoints.drop(1).forEach {lineTo(it.x,it.y)}}
-                    description.addStroke(GestureDescription.StrokeDescription(path,offset,stroke.durationMs))
+                    if(stroke.startHoldMs>0) heldPath=path
+                    else description.addStroke(GestureDescription.StrokeDescription(path,offset,stroke.durationMs))
                     val delay=offset
                     mainHandler.postDelayed({
                         if(!expired.get() && currentHost()) {
@@ -968,66 +1304,95 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                             tokens.add(feedback.begin(ActionFeedbackGeometry(if(stroke.points.size>1) "swipe" else kind,
                                 listOf((xs.min()-24).toInt(),(ys.min()-24).toInt(),(xs.max()+24).toInt(),(ys.max()+24).toInt()),
                                 start,if(stroke.points.size>1) start else null,if(stroke.points.size>1) end else null,
-                                pathPoints,stroke.durationMs)))
+                                pathPoints,stroke.totalMs)))
                         }
                     },delay)
-                    offset+=stroke.durationMs+interval
+                    offset+=stroke.totalMs+interval
                 }
                 val expectedMs=offset-interval
                 mainHandler.post {
                     if(expired.get() || !currentHost() || !sameScreen()) {latch.countDown();return@post}
-                    ownGestureGeneration.set(executionGeneration)
                     try {
-                        submitted.set(dispatchGesture(description.build(),object:GestureResultCallback() {
-                            override fun onCompleted(gestureDescription:GestureDescription?) {confirmed.set(true);ownGestureGeneration.compareAndSet(executionGeneration,-1);latch.countDown()}
-                            override fun onCancelled(gestureDescription:GestureDescription?) {ownGestureGeneration.compareAndSet(executionGeneration,-1);latch.countDown()}
-                        },mainHandler))
-                        if(!submitted.get()) {ownGestureGeneration.compareAndSet(executionGeneration,-1);latch.countDown()}
-                    } catch(_:Exception) {ownGestureGeneration.compareAndSet(executionGeneration,-1);latch.countDown()}
+                        if (readInterrupted(executionGeneration)) { latch.countDown(); return@post }
+                        if (kind == "tap" && command.optJSONObject("semantic_intent")?.opt("request_login_code") == true) {
+                            try { loginRequest.set(LoginAssist(this).beginCodeRequest(pkg, command.getString("run_id"))) }
+                            catch (error: IllegalStateException) {
+                                data.put("reason_code", "login_request_unavailable")
+                                    .put("login_request_error", error.message ?: "登录验证码监听不可用")
+                                latch.countDown(); return@post
+                            }
+                        }
+                        ownGestureGeneration.set(executionGeneration.generation)
+                        val callback=object:GestureResultCallback() {
+                            override fun onCompleted(gestureDescription:GestureDescription?) {confirmed.set(true);ownGestureGeneration.compareAndSet(executionGeneration.generation,-1);latch.countDown()}
+                            override fun onCancelled(gestureDescription:GestureDescription?) {ownGestureGeneration.compareAndSet(executionGeneration.generation,-1);latch.countDown()}
+                        }
+                        fun submit():Boolean = if(held==null) dispatchTrackedGesture(command.getString("run_id"),description.build(),callback,mainHandler) {
+                            !expired.get() && currentHost()
+                        } else dispatchHeldGesture(command.getString("run_id"),requireNotNull(heldPath),held.points.first(),
+                            held.startHoldMs,held.durationMs,callback) {
+                            // A long press may enter edit mode in this app. Keep the original pointer;
+                            // a new navigation generation alone must not turn this into a second touch.
+                            !expired.get() && currentHost() && displayGeometry()==dimensions &&
+                                visualWindow()?.let {visualWindowPackage(it)==pkg}==true
+                        }
+                        // Check/claim on the dispatch thread. Never hold the consent lock while waiting for a UI callback.
+                        if (payment) {
+                            val attempt = PaymentConsent(this).runPayment(consentId!!, command.getString("run_id"), Policy.hash(pkg)) {
+                                !expired.get() && currentHost() && sameScreen() && submit()
+                            }
+                            data.put("payment_guard", attempt.status).put("payment_attempted", attempt.status == "attempted")
+                            submitted.set(attempt.accepted)
+                        } else submitted.set(submit())
+                        if(!submitted.get()) {ownGestureGeneration.compareAndSet(executionGeneration.generation,-1);latch.countDown()}
+                    } catch(_:Exception) {ownGestureGeneration.compareAndSet(executionGeneration.generation,-1);latch.countDown()}
+                    finally {
+                        // A late main-thread dispatch must not reopen a timed-out request.
+                        if (expired.get() || !submitted.get()) loginRequest.get()?.let(LoginAssist.session::cancelRequest)
+                    }
                 }
                 val deadline=android.os.SystemClock.elapsedRealtime()+expectedMs+2000
                 try {
-                    while(latch.count>0 && currentHost() && android.os.SystemClock.elapsedRealtime()<deadline) latch.await(40,TimeUnit.MILLISECONDS)
-                } finally {expired.set(true);ownGestureGeneration.compareAndSet(executionGeneration,-1)}
+                    // Revocation closes MOVE admission, but HOLD must reach its stationary UP
+                    // before the caller releases the automatic-unlock operation lease.
+                    while(latch.count>0 && (held!=null || currentHost()) && android.os.SystemClock.elapsedRealtime()<deadline) latch.await(40,TimeUnit.MILLISECONDS)
+                } finally {
+                    expired.set(true);ownGestureGeneration.compareAndSet(executionGeneration.generation,-1)
+                    if (!confirmed.get()) loginRequest.get()?.let(LoginAssist.session::cancelRequest)
+                }
                 tokens.forEach {feedback.finish(it,confirmed.get())}
                 val humanizedCount = strokes.count { it.points.size == 2 }
                 data.put("action_state",if(confirmed.get()) "accepted" else if(submitted.get()) "unconfirmed" else "not_dispatched")
                     .put("backend","accessibility").put("feedback_targets",JSONArray(strokes.map {s -> JSONArray(s.points.map {p -> JSONArray(listOf(p.x,p.y))})}))
                     .put("humanized_swipes", humanizedCount)
                 if(kind in setOf("tap","double_tap")) data.put("touch_durations_ms",JSONArray(strokes.map {it.durationMs}))
+                if(held!=null) data.put("start_hold_ms",held.startHoldMs).put("move_duration_ms",held.durationMs)
                 if(confirmed.get()) data.put("completed_strokes",data.getInt("completed_strokes")+strokes.size)
                 else if(submitted.get()) data.put("unconfirmed_strokes",strokes.size)
                 return confirmed.get()
             }
             if(payment) {
-                val point=plan.strokes.single().points.single()
-                val paymentNode=refs.values.firstOrNull { node ->
-                    val bounds=Rect();node.getBoundsInScreen(bounds)
-                    node.isClickable && node.isEnabled && !node.isPassword && bounds.contains(point.x.toInt(),point.y.toInt()) &&
-                        Policy.paymentTarget("${node.text?.toString().orEmpty()} ${node.contentDescription?.toString().orEmpty()}",labels)
+                if(!dispatch(plan.strokes,0)) {
+                    data.put("human_takeover","payment")
+                    return result("blocked","付款未确认、授权已撤销或已经尝试过，请核对订单后手动处理")
                 }
-                if(paymentNode==null) {data.put("human_takeover","payment");return result("blocked","无法将付款位置核对到明确控件，请手动付款")}
-                val attempt=PaymentConsent(this).runPayment(consentId!!,command.getString("run_id"),Policy.hash(pkg)) {
-                    val token=feedback.begin(ActionFeedbackGeometry("tap",listOf(point.x.toInt()-24,point.y.toInt()-24,point.x.toInt()+24,point.y.toInt()+24),point))
-                    val accepted=sameScreen() && paymentNode.refresh() && paymentNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    feedback.finish(token,accepted);data.put("action_state",if(accepted) "accepted" else "unconfirmed");accepted
-                }
-                data.put("payment_guard",attempt.status).put("payment_attempted",attempt.status=="attempted")
-                if(!attempt.accepted) {data.put("human_takeover","payment");return result("blocked","付款未确认或已经尝试过，请核对订单后手动处理")}
             } else if(kind=="double_tap") {
                 // One Android gesture preserves the inter-tap timing. An interrupted pair is never replayed.
                 if(!dispatch(plan.strokes,plan.intervalMs)) return result(if(live()) "error" else "cancelled","双击未完整确认，已提交部分不会自动重放")
             } else {
                 for((index,stroke) in plan.strokes.withIndex()) {
                     if(!sameScreen()) return result(if(live()) "stale" else "cancelled","连续动作已停止，已完成部分不会重放")
-                    if(!dispatch(listOf(stroke),0)) return result(if(live()) "error" else "cancelled","动作未完整确认，已提交部分不会自动重放")
+                    if(!dispatch(listOf(stroke),0)) return result(if(live()) "error" else "cancelled",
+                        data.optString("login_request_error", "动作未完整确认，已提交部分不会自动重放"))
                     if(index<plan.strokes.lastIndex && plan.intervalMs>0) Thread.sleep(plan.intervalMs)
                 }
             }
             return result(if(live()) "ok" else "cancelled","系统手势已返回，请依据新截图判断实际结果")
-        } finally {pass?.close();guard?.close()}
+        } finally {
+            platformGestures.afterStopped(setOf(command.getString("run_id"))) {pass?.close();guard?.close()}
+        }
     }
-    private fun executeVisualGesture(command: JSONObject, current: JSONObject, executionGeneration: Long, readiness: ScreenReadyWait): JSONObject {
+    private fun executeVisualGesture(command: JSONObject, current: JSONObject, executionGeneration: Execution, readiness: ScreenReadyWait): JSONObject {
         fun result(status: String, message: String, observation: JSONObject? = current, data: JSONObject = JSONObject()) =
             JSONObject().put("command_id", command.getString("id")).put("run_id", command.getString("run_id"))
                 .put("status", status).put("message", message).put("observation", observation ?: JSONObject.NULL).put("data", data)
@@ -1056,7 +1421,7 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
             return gesture.blockedReason(labels, sensitive)
         }
         blocked(current)?.let { reason -> return result("blocked", "此视觉操作涉及付款、验证、敏感输入或无法确认的目标，请手动处理", data = JSONObject().put("human_takeover", reason)) }
-        if (callInProgress() || actionGeneration.get() != executionGeneration) return result("cancelled", "执行已暂停")
+        if (callInProgress() || readInterrupted(executionGeneration)) return result("cancelled", "执行已暂停")
         val verificationCapture = java.util.concurrent.atomic.AtomicReference<PixelCapture?>()
         val verificationShot = screenshot(command, readiness, executionGeneration, verificationCapture)
         if (verificationShot.optString("status") != "ok") {
@@ -1070,7 +1435,7 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
         }
         val checked = verificationCapture.get()
             ?: return stale("verification_frame_missing", "目标像素核验缺少来源帧", "verify")
-        val verified = readiness.read(::observe)
+        val verified = readiness.read(::observeVisual)
         val verifiedDimensions = displayGeometry()
         val verifiedAt = android.os.SystemClock.elapsedRealtime()
         val verificationDetails = source.contextDiagnostic(matchingSnapshot(verified), verifiedDimensions.first, verifiedDimensions.second, verifiedDimensions.third, verifiedAt)
@@ -1093,15 +1458,15 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
         val geometry = gesture.geometry(source.frame)
         val companion = DeviceWorkerService.instance
         val companionRevision = companion?.companionRevision
-        fun currentHost() = actionGeneration.get() == executionGeneration && instance === this &&
+        fun currentHost() = !readInterrupted(executionGeneration) && instance === this &&
             DeviceWorkerService.instance === companion && companion?.companionRevision == companionRevision
         fun currentInjection() = !expired.get() && currentHost()
-        val touchPass = companion?.beginCompanionGestureTouchPass(executionGeneration, gesture.durationMs + 3000, ::currentInjection)
+        val touchPass = companion?.beginCompanionGestureTouchPass(executionGeneration.generation, gesture.durationMs + 3000, ::currentInjection)
         if (companion != null && touchPass == null) return result("cancelled", "助手触区未能让出，视觉动作未执行", verified,
             visualDiagnostic("companion_touch_pass_unavailable", "input", verificationDetails))
         var guardPass: AutoCloseable? = null
         try {
-        guardPass = beginGuardGestureTouchPass(executionGeneration, gesture.durationMs + 3000, ::currentHost)
+        guardPass = beginGuardGestureTouchPass(executionGeneration.generation, gesture.durationMs + 3000, ::currentHost)
         if (guardPass == null) return result("cancelled", "触屏暂停层未能就绪，视觉动作未执行", verified,
             visualDiagnostic("touch_guard_handoff_unavailable", "input", verificationDetails))
         val token = feedback.begin(geometry)
@@ -1111,8 +1476,7 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                 callInProgress() -> "设备正在通话"
                 navigationGeneration != latestSnapshot?.navigationGeneration -> "页面导航已变化"
                 navigationGeneration != source.navigation?.navigationGeneration -> "来源页面导航已变化"
-                activeRoot()?.windowId != source.navigation?.windowId -> "来源活动窗口已变化"
-                foregroundPackage() != source.frame.packageName -> "前台应用已变化"
+                !currentVisualWindowMatches(source.navigation?.windowId, source.frame.packageName) -> "来源活动窗口已变化"
                 displayGeometry() != verifiedDimensions -> "屏幕尺寸或方向已变化"
                 android.os.SystemClock.elapsedRealtime() - checked.plan.capturedAt !in 0..1000 -> "核验截图超过派发时限"
                 else -> null
@@ -1133,14 +1497,14 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                 if (end != null) args.put("end_x", end.x.toInt()).put("end_y", end.y.toInt())
                 val proof = ShellBridgeClient.source(verified, checked.plan.rotation, checked.plan.captureId)
                     .put("captured_at", checked.plan.capturedAt).put("pixel_verification", "host_target_rgb_edges")
-                ownGestureGeneration.set(executionGeneration)
+                ownGestureGeneration.set(executionGeneration.generation)
                 try {
                     shellResult = ShellBridgeClient.get(this).executeAuthorized(command.getString("id"), command.getString("run_id"), proof, gesture.kind, args,
-                        { ShellBridgeClient.source(observe(), displayGeometry().third) }, { currentInjection() && !callInProgress() })
+                        { ShellBridgeClient.source(observeVisual(), displayGeometry().third) }, { currentInjection() && !callInProgress() })
                     accepted.set(shellResult.optString("action_state") == "accepted")
                     if (accepted.get()) actionCompletedAt.set(android.os.SystemClock.elapsedRealtime())
                     submitted.set(shellResult.optString("action_state") in setOf("accepted", "unconfirmed"))
-                } finally { ownGestureGeneration.compareAndSet(executionGeneration, -1) }
+                } finally { ownGestureGeneration.compareAndSet(executionGeneration.generation, -1) }
             }
             callback.countDown()
         } else mainHandler.post {
@@ -1162,18 +1526,19 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                     }
                 } else Path().apply { moveTo(start.x, start.y) }
                 val description = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, gesture.durationMs)).build()
-                ownGestureGeneration.set(executionGeneration)
-                submitted.set(dispatchGesture(description, object : GestureResultCallback() {
-                    override fun onCompleted(gestureDescription: GestureDescription?) { ownGestureGeneration.compareAndSet(executionGeneration, -1); actionCompletedAt.set(android.os.SystemClock.elapsedRealtime()); accepted.set(true); callback.countDown() }
-                    override fun onCancelled(gestureDescription: GestureDescription?) { ownGestureGeneration.compareAndSet(executionGeneration, -1); callback.countDown() }
-                }, mainHandler))
-                if (!submitted.get()) { ownGestureGeneration.compareAndSet(executionGeneration, -1); callback.countDown() }
-            } catch (_: Exception) { ownGestureGeneration.compareAndSet(executionGeneration, -1); callback.countDown() }
+                if (readInterrupted(executionGeneration)) { dispatchBlock.set("宿主执行状态已改变"); callback.countDown(); return@post }
+                ownGestureGeneration.set(executionGeneration.generation)
+                submitted.set(dispatchTrackedGesture(command.getString("run_id"), description, object : GestureResultCallback() {
+                    override fun onCompleted(gestureDescription: GestureDescription?) { ownGestureGeneration.compareAndSet(executionGeneration.generation, -1); actionCompletedAt.set(android.os.SystemClock.elapsedRealtime()); accepted.set(true); callback.countDown() }
+                    override fun onCancelled(gestureDescription: GestureDescription?) { ownGestureGeneration.compareAndSet(executionGeneration.generation, -1); callback.countDown() }
+                }, mainHandler, ::currentInjection))
+                if (!submitted.get()) { ownGestureGeneration.compareAndSet(executionGeneration.generation, -1); callback.countDown() }
+            } catch (_: Exception) { ownGestureGeneration.compareAndSet(executionGeneration.generation, -1); callback.countDown() }
         }
         val returned = try { callback.await(gesture.durationMs + 1800, TimeUnit.MILLISECONDS) }
             finally {
                 expired.set(true)
-                ownGestureGeneration.compareAndSet(executionGeneration, -1)
+                ownGestureGeneration.compareAndSet(executionGeneration.generation, -1)
                 touchPass?.close()
                 guardPass?.close()
             }
@@ -1186,7 +1551,7 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
                 .put("stage", if (dispatchBlock.get() == null) "verify" else "input"))
         if (accepted.get()) data.put("action_completed_at_elapsed_ms", actionCompletedAt.get())
         ShellBridgeDiagnostic.sanitize(shellResult?.optJSONObject("shell_diagnostic"))?.let { data.put("shell_diagnostic", it) }
-        if (actionGeneration.get() != executionGeneration) return result("cancelled", "执行已暂停，已提交的系统手势结果需核对", data = data)
+        if (readInterrupted(executionGeneration)) return result("cancelled", "执行已暂停，已提交的系统手势结果需核对", data = data)
         dispatchBlock.get()?.let {
             val status = VisualDispatchGate.blockedStatus(data.optString("action_state"))
             val message = if (status == "stale") "视觉动作未派发：$it，请重新观察" else "视觉动作结果未确认：$it，旧动作未重放，请核对画面"
@@ -1197,7 +1562,7 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
         if (!returned || !accepted.get()) return result("error", "系统手势未确认完成，未自动重放，请核对画面", data = data)
         var after: JSONObject? = null
         val afterShot = try {
-            after = settledObservation(executionGeneration)
+            after = settledObservation(executionGeneration, visual = true)
             screenshot(command, readiness, executionGeneration)
         } catch (_: java.util.concurrent.CancellationException) {
             JSONObject().put("status", "cancelled").put("message", "屏幕读取已中断")
@@ -1235,19 +1600,19 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
             put(id, JSONArray(ScrollCapabilities.directions(node.actionList.map { it.id }.toSet())))
         }
     }
-    private fun readInterrupted(executionGeneration: Long) = actionGeneration.get() != executionGeneration ||
-        callInProgress() || instance !== this || Thread.currentThread().isInterrupted
+    private fun readInterrupted(executionGeneration: Execution) = gestureReleaseFailed || actionGeneration.get() != executionGeneration.generation ||
+        !executionGeneration.current() || callInProgress() || instance !== this || Thread.currentThread().isInterrupted
 
     private fun capturePrivateScreen() = LoginAssist.settingsVisible || DirectMode.settingsVisible
 
-    private fun settledObservation(executionGeneration: Long): JSONObject? {
+    private fun settledObservation(executionGeneration: Execution, visual: Boolean = false): JSONObject? {
         var previous: JSONObject? = null
         var matches = 0
         repeat(6) {
             if (readInterrupted(executionGeneration)) return null
             Thread.sleep(250)
             if (readInterrupted(executionGeneration)) return null
-            val current = try { observe() } catch (_: Exception) { null }
+            val current = try { if (visual) observeVisual() else observe() } catch (_: Exception) { null }
             if (readInterrupted(executionGeneration)) return null
             if (current != null && current.optString("screen_id") == previous?.optString("screen_id")) matches++ else matches = 0
             previous = current
@@ -1256,245 +1621,184 @@ class DoppelAccessibilityService : AccessibilityService(), ObservationProvider, 
         return previous
     }
     private data class PixelCapture(val plan: ScreenshotPayloadPlan, val pixels: VisualPixels, val frame: VisualFrame?)
+    private fun ownCaptureOverlay(window: AccessibilityWindowInfo, knownPackage: String? = null): Boolean {
+        val pkg = knownPackage ?: visualWindowPackage(window)
+        return ownOverlayWindow(window, pkg) || window.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY &&
+            pkg in setOf(packageName, "dev.doppel.app", "dev.doppel.developer")
+    }
     private fun ownOverlayWindow(window: AccessibilityWindowInfo, knownPackage: String? = null): Boolean {
         if (window.isFocused || window.isActive) return false
         val pkg = knownPackage ?: window.root?.let { node ->
             try { node.packageName?.toString() } finally { @Suppress("DEPRECATION") node.recycle() }
         }
         // The companion uses TYPE_APPLICATION_OVERLAY, reported as a system/application window.
-        // Its capture hide/restore must not invalidate navigation in the underlying app.
+        // Its presentation changes must not invalidate navigation in the underlying app.
         return pkg == packageName && window.type in setOf(AccessibilityWindowInfo.TYPE_APPLICATION,
             AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY, AccessibilityWindowInfo.TYPE_SYSTEM)
     }
-    private fun windowCaptureRoute(snapshot:TargetScreenSnapshot?,geometry:Triple<Int,Int,Int>):WindowCaptureRouting.Route {
-        if(Build.VERSION.SDK_INT<34 || snapshot==null) return WindowCaptureRouting.Route(reason="unsupported_or_missing_window")
-        val candidates=windows.filter {it.displayId==Display.DEFAULT_DISPLAY}.map {window ->
-            val bounds=Rect();window.getBoundsInScreen(bounds)
-            val node=window.root
-            val pkg=try {node?.packageName?.toString().orEmpty()} finally {@Suppress("DEPRECATION") node?.recycle()}
-            val ownOverlay=ownOverlayWindow(window,pkg)
-            WindowCaptureRouting.Window(window.id,window.type==AccessibilityWindowInfo.TYPE_APPLICATION,ownOverlay,
-                window.isFocused,window.isActive,pkg,listOf(bounds.left,bounds.top,bounds.right,bounds.bottom),window.isInPictureInPictureMode,
-                systemUi = window.type == AccessibilityWindowInfo.TYPE_SYSTEM && pkg == "com.android.systemui")
+    private data class CapturedDisplay(val bitmap: Bitmap, val at: Long)
+    private class CaptureFailure(val code: Int, val reason: String? = null) : Exception()
+
+    private fun acquireScreenshot(executionGeneration: Execution, timeoutMs: Long = 5000): CapturedDisplay {
+        if (Build.VERSION.SDK_INT < 30) {
+            val geometry = displayGeometry()
+            val frame = LegacyScreenCaptureService.captureWithTimestamp(geometry.first, geometry.second, resources.displayMetrics.densityDpi) {
+                readInterrupted(executionGeneration)
+            }
+            return CapturedDisplay(frame.bitmap, frame.capturedAt)
         }
-        return WindowCaptureRouting.choose(Build.VERSION.SDK_INT,geometry.first,geometry.second,snapshot.windowId,snapshot.packageName,candidates)
+        // One bounded wait for the full-display API; restore overlay flags before waiting.
+        val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMs
+        repeat(2) { attempt ->
+            val gate = CountDownLatch(1)
+            val lock = Any()
+            var finished = false
+            var image: CapturedDisplay? = null
+            var failure = ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR
+            fun finish(value: CapturedDisplay?, error: Int) = synchronized(lock) {
+                if (finished) { value?.bitmap?.recycle(); return@synchronized }
+                image = value; failure = error; finished = true; gate.countDown()
+            }
+            val callback = object : TakeScreenshotCallback {
+                override fun onSuccess(result: ScreenshotResult) {
+                    val at = android.os.SystemClock.elapsedRealtime()
+                    var hardware: Bitmap? = null
+                    try {
+                        hardware = Bitmap.wrapHardwareBuffer(result.hardwareBuffer, result.colorSpace)
+                        val software = hardware?.copy(Bitmap.Config.ARGB_8888, false)
+                        finish(software?.let { CapturedDisplay(it, at) }, ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR)
+                    } catch (_: Exception) { finish(null, ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR) }
+                    finally { hardware?.recycle(); result.hardwareBuffer.close() }
+                }
+                override fun onFailure(errorCode: Int) { finish(null, errorCode) }
+            }
+            fun requestAndWait() {
+                if (readInterrupted(executionGeneration)) throw ScreenReadInterruptedException()
+                if (android.os.SystemClock.elapsedRealtime() >= deadline) throw java.util.concurrent.TimeoutException("Screen capture timed out")
+                try { takeScreenshot(Display.DEFAULT_DISPLAY, screenshotExecutor, callback) }
+                catch (_: SecurityException) { callback.onFailure(ERROR_TAKE_SCREENSHOT_NO_ACCESSIBILITY_ACCESS) }
+                catch (_: Exception) { callback.onFailure(ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR) }
+                while (gate.count > 0) {
+                    if (readInterrupted(executionGeneration)) throw ScreenReadInterruptedException()
+                    val left = deadline - android.os.SystemClock.elapsedRealtime()
+                    if (left <= 0) throw java.util.concurrent.TimeoutException("Screen capture timed out")
+                    gate.await(minOf(100, left), TimeUnit.MILLISECONDS)
+                }
+            }
+            try {
+                if (Build.VERSION.SDK_INT >= 34) TemporaryScreenshotExclusion.capture(::requestAndWait)
+                else requestAndWait()
+                if (readInterrupted(executionGeneration)) throw ScreenReadInterruptedException()
+                synchronized(lock) { image?.let { image = null; return it } }
+                if (failure != ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT || attempt != 0) throw CaptureFailure(failure)
+                if (deadline - android.os.SystemClock.elapsedRealtime() <= 400) throw CaptureFailure(failure)
+            } finally {
+                synchronized(lock) { finished = true; image?.bitmap?.recycle(); image = null }
+            }
+            repeat(4) {
+                if (readInterrupted(executionGeneration)) throw ScreenReadInterruptedException()
+                Thread.sleep(100)
+            }
+        }
+        throw CaptureFailure(ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT)
     }
-    private fun screenshot(command: JSONObject, readiness: ScreenReadyWait, executionGeneration: Long,
+
+    private fun screenshot(command: JSONObject, readiness: ScreenReadyWait, executionGeneration: Execution,
         verification: java.util.concurrent.atomic.AtomicReference<PixelCapture?>? = null): JSONObject =
         readiness.read { captureScreenshotOnce(command, readiness, executionGeneration, verification) }
 
-    private fun captureScreenshotOnce(command: JSONObject, readiness: ScreenReadyWait, executionGeneration: Long,
+    private fun captureScreenshotOnce(command: JSONObject, readiness: ScreenReadyWait, executionGeneration: Execution,
         verification: java.util.concurrent.atomic.AtomicReference<PixelCapture?>?): JSONObject {
         verification?.set(null)
-        val result = JSONObject().put("command_id", command.getString("id")).put("run_id", command.getString("run_id")).put("status", "error").put("message", "屏幕采集不可用").put("data", JSONObject())
-        val before = readiness.read(::observe)
+        val result = JSONObject().put("command_id", command.getString("id")).put("run_id", command.getString("run_id"))
+            .put("status", "error").put("message", "屏幕采集不可用").put("data", JSONObject())
+        if (getSystemService(android.app.KeyguardManager::class.java).isKeyguardLocked ||
+            !getSystemService(android.os.PowerManager::class.java).isInteractive) return result.put("status", "blocked")
+            .put("message", "设备已锁定或息屏，请解锁后继续")
+            .put("data", JSONObject().put("reason_code", "device_locked"))
+        val before = readiness.read(::observeVisual)
+        var privacyVerified = refreshVisibleCapturePrivacy()
         val beforePrivateBounds = privateCaptureBounds
-        val beforeSnapshot = latestSnapshot?.takeIf {
-            it.screenId == before.optString("screen_id") && it.navigationGeneration == navigationGeneration
-        }
-        val beforeGeometry = displayGeometry()
-        fun privateScreen() = capturePrivateScreen()
-        fun blocked() = result.put("status", "blocked").put("message", "登录资料与模型连接设置期间不上传截图").put("data", JSONObject().put("human_takeover", "login"))
+        val beforeSnapshot = latestSnapshot
+        val geometry = displayGeometry()
+        val windowsBefore = captureWindowSignature()
+        fun privateScreen() = !privacyVerified || capturePrivateScreen() || PaymentConsent.settingsVisible || AutomaticUnlockSession.isAuthenticating ||
+            AutomaticUnlockSession.isUnlocking || getSystemService(android.app.KeyguardManager::class.java).isKeyguardLocked ||
+            !getSystemService(android.os.PowerManager::class.java).isInteractive || ScreenCapturePrivacy.unavailable(before) ||
+            privateWindowBounds.any { (id, bounds) -> id in capturePrivacyWindowIds() && bounds.isNotEmpty() && privateWindowGeometry[id] != geometry }
+        fun blocked() = result.put("status", "blocked").put("message", "登录资料与模型连接设置期间不上传截图")
+            .put("data", JSONObject().put("human_takeover", "login"))
+        fun stale(reason: String) = result.put("status", "stale").put("message", "截图期间窗口发生变化，请重新观察")
+            .put("data", visualDiagnostic(reason, "capture"))
         if (privateScreen()) return blocked()
-        val route=windowCaptureRoute(beforeSnapshot,beforeGeometry)
-        val windowId=route.windowId
-        if (Build.VERSION.SDK_INT >= 34 && windowId == null) return result
-            .put("message", "当前主应用窗口尚不可读取，请重新观察")
-            .put("data", JSONObject().put("reason_code", "capture_window_unavailable").put("window_reason", route.reason))
-        val shellCapture = windowId==null && shellBridgeReady()
-        if (!shellCapture && Build.VERSION.SDK_INT < 30 && !LegacyScreenCaptureService.isReady) return result.put("status", "blocked")
+        if (Build.VERSION.SDK_INT < 30 && !LegacyScreenCaptureService.isReady) return result.put("status", "blocked")
             .put("message", "请在 Doppel 设置的屏幕识别中授权本次屏幕采集")
             .put("data", JSONObject().put("human_takeover", "screen_capture_required"))
-        if (windowId==null && !feedback.clearBeforeScreenshot()) return result.put("message", "屏幕反馈仍在清理，请重新截图")
-            .put("data", visualDiagnostic("capture_feedback_pending", "capture").put("feedback_cleanup",feedback.captureCleanupDiagnostic()))
-        val companion = DeviceWorkerService.instance
-        val companionRevision = companion?.companionRevision
-        val shieldCapture = if (windowId == null) AutomaticUnlockSession.capturePass() else AutoCloseable { }
-        if (shieldCapture == null) return result.put("message", "自动任务保护界面未能隐藏，截图已取消")
+        val started = android.os.SystemClock.elapsedRealtime()
+        var normal: CapturedDisplay? = null
+        var scaled: Bitmap? = null
+        var output: Bitmap? = null
         try {
-        if (windowId==null && companion?.hideCompanionForScreenshot() == false) return result.put("message", "助手界面仍在清理，请重新截图")
-            .put("data", visualDiagnostic("capture_companion_pending", "capture"))
-        val latch = CountDownLatch(1)
-        val captured = java.util.concurrent.atomic.AtomicReference<JSONObject?>()
-        val visualCapture = java.util.concurrent.atomic.AtomicReference<PixelCapture?>()
-        val captureRotation = beforeGeometry.third
-        fun acceptBitmap(software: Bitmap, capturedAt: Long, shellSource: JSONObject? = null) {
-            var outputBitmap: Bitmap? = null
-            var windowBitmap: Bitmap? = null
-            try {
-                // Only the target window's pixels are captured. Place smaller windows at their
-                // screen bounds so the existing normalized-coordinate executor stays exact.
-                val source = if (windowId != null) {
-                    val bounds = requireNotNull(route.bounds)
-                    if (bounds == listOf(0, 0, beforeGeometry.first, beforeGeometry.second) &&
-                        software.width == beforeGeometry.first && software.height == beforeGeometry.second) software
-                    else Bitmap.createBitmap(beforeGeometry.first, beforeGeometry.second, Bitmap.Config.ARGB_8888).also { mapped ->
-                        windowBitmap = mapped
-                        android.graphics.Canvas(mapped).apply {
-                            drawColor(android.graphics.Color.BLACK)
-                            drawBitmap(software, null, Rect(bounds[0], bounds[1], bounds[2], bounds[3]), null)
-                        }
-                    }
-                } else software
-                val plan = ScreenshotPayloadPlan(shellSource?.getString("capture_id") ?: java.util.UUID.randomUUID().toString(),
-                    before.getString("screen_id"), before.getString("package_name"), source.width, source.height, captureRotation,
-                    capturedAt, verificationOnly = verification != null)
-                val scaled = if (plan.imageWidth != source.width || plan.imageHeight != source.height)
-                    Bitmap.createScaledBitmap(source, plan.imageWidth, plan.imageHeight, true) else source
-                outputBitmap = scaled
-                val pixels = IntArray(scaled.width * scaled.height); scaled.getPixels(pixels, 0, scaled.width, 0, 0, scaled.width, scaled.height)
-                val visiblePixels = ScreenPixelContent.hasVisibleRgb(pixels)
-                ScreenPrivacyMask.apply(pixels, scaled.width, scaled.height, plan.displayWidth, plan.displayHeight, beforePrivateBounds)
-                val output = if (beforePrivateBounds.isEmpty()) scaled else Bitmap.createBitmap(pixels, scaled.width, scaled.height, Bitmap.Config.ARGB_8888)
-                outputBitmap = output
-                if (scaled !== output && scaled !== source) scaled.recycle()
-                if (!visiblePixels) {
-                    captured.set(JSONObject().put("status", "not_ready"))
-                } else {
-                    var frame: VisualFrame? = null
-                    val data = plan.encodeForDelivery {
-                        val stream = ByteArrayOutputStream(); check(output.compress(Bitmap.CompressFormat.PNG, 100, stream))
-                        val bytes = stream.toByteArray()
-                        val exportedFrame = VisualFrame(plan.captureId, plan.screenId, plan.packageName, plan.displayWidth, plan.displayHeight,
-                            plan.imageWidth, plan.imageHeight, plan.rotation, plan.capturedAt, plan.expiresAt,
-                            java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) })
-                        frame = exportedFrame
-                        JSONObject().put("image_base64", Base64.encodeToString(bytes, Base64.NO_WRAP))
-                            .put("mime_type", "image/png").put("visual_frame", exportedFrame.json())
-                    } ?: JSONObject()
-                    data.put("capture_backend", if(windowId!=null) "accessibility_window" else if (shellSource != null) "adb_shell" else if (Build.VERSION.SDK_INT < 30) "media_projection" else "accessibility")
-                        .put("privacy_mask_count", beforePrivateBounds.size)
-                        .put("overlay_cleanup_performed",windowId==null)
-                        .put("capture_pixels_on_main_thread",android.os.Looper.myLooper()==android.os.Looper.getMainLooper())
-                    if(windowId!=null) data.put("capture_window_id",windowId).put("capture_window_bounds",JSONArray(route.bounds))
-                    visualCapture.set(PixelCapture(plan, VisualPixels(output.width, output.height, pixels), frame))
-                    captured.set(JSONObject().put("status", "ok").put("message", "").put("data", data))
-                }
-            } finally {
-                if (outputBitmap !== software && outputBitmap !== windowBitmap) outputBitmap?.recycle()
-                windowBitmap?.recycle()
-            }
-        }
-        if (shellCapture) {
-            val shot = ShellBridgeClient.get(this).captureAuthorized({ !readInterrupted(executionGeneration) }, { !privateScreen() })
-            if (shot.optString("status") != "ok") return result.put("status", shot.optString("status", "error"))
-                .put("message", "ADB截图未确认，请检查辅助权限").put("data", shot)
-            val bytes = Base64.decode(shot.getString("image_base64"), Base64.NO_WRAP)
-            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return result.put("message", "ADB截图无法解码")
-            try { acceptBitmap(bitmap, shot.getLong("captured_at"), shot) } finally { bitmap.recycle(); latch.countDown() }
-        } else if (Build.VERSION.SDK_INT < 30) {
-            var bitmap: Bitmap? = null
-            try {
-                val geometry = displayGeometry()
-                val frame = LegacyScreenCaptureService.captureWithTimestamp(geometry.first, geometry.second, resources.displayMetrics.densityDpi) {
-                    readInterrupted(executionGeneration)
-                }
-                bitmap = frame.bitmap
-                acceptBitmap(frame.bitmap, frame.capturedAt)
-            } catch (cancelled: java.util.concurrent.CancellationException) { throw cancelled }
-            catch (error: Exception) {
-                val reason = when (error) {
-                    is java.util.concurrent.TimeoutException -> "timeout"
-                    is SecurityException -> "authorization_required"
-                    is IllegalArgumentException -> "invalid_geometry"
-                    else -> "unavailable"
-                }
-                captured.set(JSONObject().put("status", if (reason == "authorization_required") "blocked" else "error")
-                    .put("message", "屏幕采集不可用，请检查屏幕识别授权后重新观察")
-                    .put("data", JSONObject().put("reason_code", "capture_$reason")
-                        .put("capture_diagnostic", JSONObject().put("source", "media_projection").put("reason", reason))
-                        .apply { if (reason == "authorization_required") put("human_takeover", "screen_capture_required") }))
-            }
-            finally { bitmap?.recycle(); latch.countDown() }
-        } else {
-        val callback=object : TakeScreenshotCallback {
-            override fun onSuccess(value: ScreenshotResult) {
-                // Capture age begins at callback entry, before copying, scaling or delivery encoding.
-                val capturedAt = android.os.SystemClock.elapsedRealtime()
-                var hardwareBitmap: Bitmap? = null
-                var softwareBitmap: Bitmap? = null
-                try {
-                    val bitmap = Bitmap.wrapHardwareBuffer(value.hardwareBuffer, value.colorSpace)
-                    hardwareBitmap = bitmap
-                    if (bitmap != null) {
-                        val software = bitmap.copy(Bitmap.Config.ARGB_8888, false) ?: throw IllegalStateException("截图像素不可读")
-                        softwareBitmap = software
-                        acceptBitmap(software, capturedAt)
-                    }
-                } catch (_: Exception) {
-                    captured.set(JSONObject().put("status", "error").put("message", "截图像素处理失败，请重新观察")); visualCapture.set(null)
-                } finally {
-                    softwareBitmap?.recycle(); hardwareBitmap?.recycle()
-                    value.hardwareBuffer.close(); latch.countDown()
-                }
-            }
-            override fun onFailure(errorCode: Int) {
-                val denied=errorCode==ERROR_TAKE_SCREENSHOT_SECURE_WINDOW || errorCode==ERROR_TAKE_SCREENSHOT_NO_ACCESSIBILITY_ACCESS
-                val reason=when(errorCode) {
-                    ERROR_TAKE_SCREENSHOT_SECURE_WINDOW -> "secure_window"
-                    ERROR_TAKE_SCREENSHOT_NO_ACCESSIBILITY_ACCESS -> "accessibility_access_required"
-                    ERROR_TAKE_SCREENSHOT_INVALID_WINDOW -> "invalid_window"
-                    ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT -> "rate_limited"
-                    ERROR_TAKE_SCREENSHOT_INVALID_DISPLAY -> "invalid_display"
-                    else -> "internal_error"
-                }
-                captured.set(JSONObject().put("status",if(denied) "blocked" else "error")
-                        .put("message",if(denied) "当前窗口禁止截图或无障碍截图权限不可用" else "截图不可用，请重新观察")
-                        .put("data",JSONObject().put("reason_code","capture_$reason").put("capture_error_code",errorCode)
-                            .put("capture_backend",if(windowId!=null) "accessibility_window" else "accessibility")))
-                latch.countDown()
-            }
-        }
-        try {
-            if(windowId!=null && Build.VERSION.SDK_INT>=34) takeScreenshotOfWindow(windowId,screenshotExecutor,callback)
-            else takeScreenshot(Display.DEFAULT_DISPLAY,screenshotExecutor,callback)
-        } catch(_:SecurityException) {callback.onFailure(ERROR_TAKE_SCREENSHOT_NO_ACCESSIBILITY_ACCESS)}
-        catch(_:UnsupportedOperationException) {callback.onFailure(ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR)}
-        catch(_:IllegalArgumentException) {callback.onFailure(ERROR_TAKE_SCREENSHOT_INVALID_WINDOW)}
-        }
-        // Late callbacks own a separate result and cannot attach an image after timeout.
-        val captureDeadline = android.os.SystemClock.elapsedRealtime() + 5000
-        while (latch.count > 0) {
-            if (readInterrupted(executionGeneration)) throw ScreenReadInterruptedException()
-            val remaining = captureDeadline - android.os.SystemClock.elapsedRealtime()
-            if (remaining <= 0) return result.put("status", "error").put("message", "截图超时")
-                .put("data", visualDiagnostic("capture_timeout", "capture"))
-            latch.await(minOf(100, remaining), TimeUnit.MILLISECONDS)
-        }
-        if (readInterrupted(executionGeneration)) throw ScreenReadInterruptedException()
-        val shot = captured.get() ?: return result.put("message", "截图处理失败")
-        if (shot.optString("status") == "not_ready") {
-            android.util.Log.i("DoppelFrameReadiness", "reason=empty_frame elapsed_ms=${android.os.SystemClock.elapsedRealtime()}")
-            throw ScreenNotReadyException(ScreenReadinessReason.EMPTY_FRAME)
-        }
-        result.put("status", shot.optString("status", "error")).put("message", shot.optString("message")).put("data", shot.optJSONObject("data") ?: JSONObject())
-        if (result.optString("status") == "ok") {
-            val after = readiness.read(::observe)
+            normal = acquireScreenshot(executionGeneration)
+            if (windowsBefore != captureWindowSignature()) return stale("capture_window_changed")
             if (privateScreen()) return blocked()
-            if (beforePrivateBounds.toSet() != privateCaptureBounds.toSet()) return result.put("status", "stale")
-                .put("message", "敏感输入区域在截图期间变化，请重新观察").put("data", visualDiagnostic("capture_private_region_changed", "capture"))
-            if (DeviceWorkerService.instance !== companion || companion?.companionRevision != companionRevision) return result.put("status", "stale").put("message", "助手窗口在截图期间重建，请重新观察").put("data", visualDiagnostic("capture_companion_changed", "capture"))
-            val capture = visualCapture.get() ?: return result.put("status", "error").put("message", "截图来源记录缺失").put("data", JSONObject())
-            val dimensions = displayGeometry()
-            if (beforeGeometry != dimensions || capture.plan.displayWidth != dimensions.first || capture.plan.displayHeight != dimensions.second || capture.plan.rotation != dimensions.third)
-                return result.put("status", "stale").put("message", "截图尺寸或方向已变化，请重新观察").put("data", visualDiagnostic("capture_geometry_changed", "capture"))
-            val afterSnapshot = latestSnapshot?.takeIf {
-                it.screenId == after.optString("screen_id") && it.navigationGeneration == navigationGeneration
-            }
-            if(windowId!=null && windowCaptureRoute(afterSnapshot,dimensions).let { it.windowId!=windowId || it.bounds!=route.bounds })
-                return result.put("status", "stale").put("message", "主应用窗口位置已变化，请重新观察")
-                    .put("data", visualDiagnostic("capture_window_changed", "capture"))
-            val binding = CaptureObservationBinding.bind(capture.plan, beforeSnapshot, afterSnapshot, beforeGeometry, dimensions, android.os.SystemClock.elapsedRealtime())
-                ?: return result.put("status", "stale").put("message", "截图期间窗口、导航或采集来源发生变化，请重新观察")
-                    .put("data", visualDiagnostic("capture_screen_changed", "capture")).put("observation", after)
-            val paired = PixelCapture(binding.plan, capture.pixels, capture.frame?.let(binding::bindFrame))
-            result.getJSONObject("data").put("capture_observation", binding.metadata())
-            paired.frame?.let { result.getJSONObject("data").put("visual_frame", it.json()) }
+            val source = normal.bitmap
+            if (source.width != geometry.first || source.height != geometry.second || geometry != displayGeometry()) return stale("capture_geometry_changed")
+            val plan = ScreenshotPayloadPlan(java.util.UUID.randomUUID().toString(), before.getString("screen_id"),
+                before.getString("package_name"), source.width, source.height, geometry.third, normal.at, verificationOnly = verification != null)
+            scaled = if (plan.imageWidth != source.width || plan.imageHeight != source.height)
+                Bitmap.createScaledBitmap(source, plan.imageWidth, plan.imageHeight, true) else source
+            val pixels = IntArray(scaled.width * scaled.height)
+            scaled.getPixels(pixels, 0, scaled.width, 0, 0, scaled.width, scaled.height)
+            ScreenPrivacyMask.apply(pixels, scaled.width, scaled.height, plan.displayWidth, plan.displayHeight, beforePrivateBounds)
+            output = Bitmap.createBitmap(pixels, scaled.width, scaled.height, Bitmap.Config.ARGB_8888)
+            val after = readiness.read(::observeVisual)
+            privacyVerified = refreshVisibleCapturePrivacy()
+            if (privateScreen() || ScreenCapturePrivacy.unavailable(after)) return blocked()
+            if (beforePrivateBounds.toSet() != privateCaptureBounds.toSet()) return stale("capture_private_region_changed")
+            if (windowsBefore != captureWindowSignature()) return stale("capture_window_changed")
+            val binding = CaptureObservationBinding.bind(plan, beforeSnapshot, latestSnapshot, geometry, displayGeometry(), android.os.SystemClock.elapsedRealtime())
+                ?: return stale("capture_screen_changed").put("observation", after)
+            var frame: VisualFrame? = null
+            val data = binding.plan.encodeForDelivery {
+                val bytes = ByteArrayOutputStream().use { stream -> check(output.compress(Bitmap.CompressFormat.PNG, 100, stream)); stream.toByteArray() }
+                frame = VisualFrame(plan.captureId, binding.plan.screenId, plan.packageName, plan.displayWidth, plan.displayHeight,
+                    plan.imageWidth, plan.imageHeight, plan.rotation, plan.capturedAt, plan.expiresAt,
+                    java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) })
+                JSONObject().put("image_base64", Base64.encodeToString(bytes, Base64.NO_WRAP)).put("mime_type", "image/png").put("visual_frame", frame!!.json())
+            } ?: JSONObject()
+            data.put("capture_backend", if (Build.VERSION.SDK_INT >= 34) "accessibility_skip_screenshot" else if (Build.VERSION.SDK_INT >= 30) "accessibility_full_display" else "media_projection")
+                .put("privacy_mask_count", beforePrivateBounds.size).put("overlay_cleanup_performed", false)
+                .put("capture_elapsed_ms", android.os.SystemClock.elapsedRealtime() - started)
+                .put("capture_pixels_on_main_thread", android.os.Looper.myLooper() == android.os.Looper.getMainLooper())
+                .put("capture_observation", binding.metadata())
+            val paired = PixelCapture(binding.plan, VisualPixels(output.width, output.height, pixels), frame)
             if (verification != null) verification.set(paired)
-            else visualCaptures.put(VisualCapture(requireNotNull(paired.frame), paired.pixels, binding.navigation))
-            result.put("observation", after)
+            else if (frame != null) visualCaptures.put(VisualCapture(frame!!, paired.pixels, binding.navigation))
+            return result.put("status", "ok").put("message", "").put("data", data).put("observation", after)
+        } catch (_: TemporaryScreenshotExclusion.Changed) {
+            return stale("capture_overlay_changed")
+        } catch (_: TemporaryScreenshotExclusion.Unavailable) {
+            return result.put("status", "error").put("message", "当前设备暂时无法排除悬浮层截图，请重试")
+                .put("data", JSONObject().put("reason_code", "capture_overlay_unavailable"))
+        } catch (failure: CaptureFailure) {
+            val denied = failure.code == ERROR_TAKE_SCREENSHOT_SECURE_WINDOW || failure.code == ERROR_TAKE_SCREENSHOT_NO_ACCESSIBILITY_ACCESS
+            val reason = failure.reason ?: when (failure.code) {
+                ERROR_TAKE_SCREENSHOT_SECURE_WINDOW -> "secure_window"
+                ERROR_TAKE_SCREENSHOT_NO_ACCESSIBILITY_ACCESS -> "accessibility_access_required"
+                ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT -> "rate_limited"
+                else -> "unavailable"
+            }
+            return result.put("status", if (denied) "blocked" else "error").put("message", when {
+                denied -> "当前窗口禁止截图或无障碍截图权限不可用"
+                reason == "geometry_unsupported" -> "当前窗口尺寸无法可靠映射到屏幕，请更换页面后重试"
+                else -> "截图不可用，请重新观察"
+            })
+                .put("data", JSONObject().put("reason_code", "capture_$reason").put("capture_error_code", failure.code))
+        } finally {
+            output?.recycle()
+            if (scaled !== normal?.bitmap) scaled?.recycle()
+            normal?.bitmap?.recycle()
         }
-        return result
-        } finally { try { if(windowId==null) companion?.restoreCompanionAfterScreenshot() } finally { shieldCapture.close() } }
     }
 }

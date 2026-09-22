@@ -1,3 +1,5 @@
+@file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+
 package dev.doppel.developer
 
 import android.app.KeyguardManager
@@ -74,7 +76,7 @@ class ScreenshotTransitionDeviceTest {
         assertFalse("Do not migrate an existing connection", prefs.getBoolean("artemis_mode", false))
         val activeBefore = prefs.getString("active_run", "").orEmpty()
         val tasksBefore = fileBytes("direct-runs-v1.json")
-        val runs = tasksBefore?.let { JSONArray(String(it, Charsets.UTF_8)) } ?: JSONArray()
+        val runs = tasksBefore?.let { dev.doppel.sdk.SplitTaskEngine.readPersistedRuns(String(it, Charsets.UTF_8)) } ?: JSONArray()
         val terminal = setOf("completed", "failed", "cancelled")
         assertTrue("Never interrupt an unfinished task", (0 until runs.length()).all {
             runs.getJSONObject(it).optString("status") in terminal
@@ -159,14 +161,14 @@ class ScreenshotTransitionDeviceTest {
                     val receipt = JSONObject().put("cycle", cycle).put("target", name).put("attempt", attempt + 1)
                         .put("elapsed_ms", SystemClock.elapsedRealtime() - started).put("status", result.optString("status"))
                         .put("observed_package", observedPackage).put("expected_package", expectedPackage)
-                    for (key in listOf("capture_backend", "window_capture_fallback", "capture_window_id", "overlay_cleanup_performed",
+                    for (key in listOf("capture_backend", "native_window_capture", "overlay_cleanup_performed",
                         "capture_pixels_on_main_thread", "reason_code", "read_diagnostic", "feedback_cleanup"))
                         if (data.has(key)) receipt.put(key, data.get(key))
                     val rootFailed = data.optJSONObject("read_diagnostic")?.optString("reason_code") == "root_unavailable"
                     consecutiveRootFailures = if (rootFailed) consecutiveRootFailures + 1 else 0
                     maxRootFailures = maxOf(maxRootFailures, consecutiveRootFailures)
                     if (result.optString("status") == "ok" && observedPackage == expectedPackage) {
-                        assertEquals("Android 14 must capture only the primary window, even beside other windows", "accessibility_window", data.getString("capture_backend"))
+                        assertEquals("Android 14 must compose current native windows without assistant overlays", "accessibility_windows", data.getString("capture_backend"))
                         assertFalse("The companion must remain visible during native window capture", data.getBoolean("overlay_cleanup_performed"))
                         val bytes = Base64.decode(data.getString("image_base64"), Base64.NO_WRAP)
                         val bitmap = requireNotNull(BitmapFactory.decodeByteArray(bytes, 0, bytes.size))

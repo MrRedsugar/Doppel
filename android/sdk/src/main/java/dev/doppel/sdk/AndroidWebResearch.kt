@@ -1,25 +1,32 @@
 package dev.doppel.sdk
 
+import android.content.Context
+import android.content.pm.ApplicationInfo
 import okhttp3.Authenticator
 import okhttp3.Call
 import okhttp3.CookieJar
 import okhttp3.Dns
+import okhttp3.EventListener
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
-import org.json.JSONArray
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import org.json.JSONObject
+import org.json.JSONArray
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.Proxy
 import java.nio.charset.Charset
 import java.util.concurrent.Future
-import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
@@ -29,20 +36,27 @@ import java.util.concurrent.atomic.AtomicReference
 
 /** Public, unauthenticated web references. Call from a worker thread; never from the UI thread.
  * Returned text is untrusted reference data and must not grant device or tool permissions.
- * HTML providers are replaceable and have no availability guarantee. No browser is opened.
+ * Search parsing is adapted from Apache-2.0 open-webSearch. No browser is opened.
  */
-class AndroidWebResearch internal constructor(private val transport: WebResearchTransport) {
+class AndroidWebResearch internal constructor(private val transport: WebResearchTransport, private val reader: WebPageReader? = null) {
     constructor() : this(PublicWebTransport())
+    constructor(context: Context) : this(PublicWebTransport(debug = context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0), AndroidPageReader(context))
 
     private val busy = AtomicBoolean(false)
     private val generation = AtomicLong()
     private val lifecycle = Any()
+    // One reader belongs to one chat request or task runtime; retain only a few bounded snapshots.
+    private var pageGeneration = 0L
+    private val pages = object : LinkedHashMap<String, WebResearchParsing.Text>(4, .75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, WebResearchParsing.Text>?) = size > 4
+    }
 
     /** Cancels only the current operation. Subsequent search/read calls can reuse this instance. */
     fun cancel() {
         synchronized(lifecycle) {
             generation.incrementAndGet()
             transport.cancel()
+            reader?.cancel()
         }
     }
 
@@ -52,14 +66,14 @@ class AndroidWebResearch internal constructor(private val transport: WebResearch
         if (clean.isEmpty() || clean.length > 180 || clean.any { it.isISOControl() })
             fail("invalid_query", "搜索词需为 1–180 个字符，且不能含控制字符。")
         var lastFailure: WebResearchFailure? = null
-        for (provider in listOf("360", "sogou")) {
+        for (provider in listOf("bing", "sogou")) {
             scope.check()
-            val endpoint = if (provider == "360") "https://www.so.com/s" else "https://www.sogou.com/web"
+            val endpoint = if (provider == "bing") "https://cn.bing.com/search" else "https://www.sogou.com/web"
             val url = WebResearchUrls.parse(endpoint).newBuilder()
-                .addQueryParameter(if (provider == "360") "q" else "query", clean).build()
+                .addQueryParameter(if (provider == "bing") "q" else "query", clean).build()
             try {
                 val page = fetch(url, scope)
-                val results = WebResearchParsing.search(page, provider)
+                val results = OpenWebSearchParsing.search(page, provider)
                 if (results.length() == 0) fail("no_search_results", "搜索页面未返回可用结果，请换用更具体的关键词。")
                 return@operation success().put("query", clean).put("provider", provider)
                     .put("source_url", page.url.toString()).put("results", results)
@@ -75,12 +89,81 @@ class AndroidWebResearch internal constructor(private val transport: WebResearch
     }
 
     @JvmOverloads
-    fun read(url: String, isCurrent: () -> Boolean = { true }): JSONObject = operation(isCurrent) { scope ->
-        val page = fetch(WebResearchUrls.parse(url), scope)
-        val content = WebResearchParsing.read(page)
-        success().put("url", page.url.toString()).put("source", page.url.host)
-            .put("title", content.title).put("text", content.text).put("truncated", content.truncated)
+    fun read(url: String, isCurrent: () -> Boolean = { true }): JSONObject =
+        readPage(JSONObject().put("url", url).put("limit", WebResearchLimits.MAX_TEXT).put("refresh", true), isCurrent)
+
+    /** Pagination is over a stable local snapshot, not another download per excerpt. */
+    fun readPage(args: JSONObject, isCurrent: () -> Boolean = { true }): JSONObject = operation(isCurrent) { scope ->
+        val url = WebResearchUrls.parse(args.optString("url"))
+        val operation = args.optString("operation", "read")
+        if (operation !in setOf("info", "search", "read", "screenshot")) fail("invalid_operation", "网页读取操作无效。")
+        val pageReader = reader ?: fail("reader_unavailable", "本机网页阅读需要 Android 应用上下文。")
+        fun readerResponse(format: String): WebResearchPage {
+            scope.check()
+            val response = pageReader.read(url, format, scope.deadline, scope::check)
+            scope.check()
+            if (response.bytes.size > WebResearchLimits.MAX_BYTES) fail("response_too_large", "阅读服务返回的内容超过读取上限。")
+            if (response.redirect != null) fail("reader_response_invalid", "本机阅读器未完成网页加载。")
+            if (response.url != url) fail("reader_response_invalid", "本机阅读器响应来源不匹配。")
+            return response
+        }
+        if (operation == "screenshot") {
+            val result = JinaReaderChannel.screenshot(url, readerResponse("screenshot"))
+            return@operation result.put("ok", true).put("untrusted", true).put("content_role", "reference_only")
+                .put("url", url.toString()).put("source", url.host).put("provider", "jina-ai/reader-local").put("operation", operation)
+        }
+        fun integer(name: String, default: Int, min: Int, max: Int): Int {
+            if (!args.has(name)) return default
+            val value = args.opt(name)
+            if (value !is Number || !value.toDouble().isFinite() || value.toDouble() != value.toLong().toDouble() || value.toLong() !in min.toLong()..max.toLong())
+                fail("invalid_range", "网页读取范围无效。")
+            return value.toInt()
+        }
+        val requestedOffset = integer("offset", 0, 0, Int.MAX_VALUE)
+        val limit = integer("limit", 4000, 1, WebResearchLimits.MAX_TEXT)
+        val query = args.optString("query")
+        if (operation == "search" && (query.isBlank() || query.length > 100)) fail("invalid_query", "网页搜索词需为 1 至 100 字。")
+        if (pageGeneration != scope.generation) { pages.clear(); pageGeneration = scope.generation }
+        if (args.optBoolean("refresh")) pages.remove(url.toString())
+        if (requestedOffset > 0 && !pages.containsKey(url.toString()))
+            fail("snapshot_expired", "原网页快照已失效，不能沿用旧读取位置；请从 offset=0 重新读取或搜索定位。")
+        val content = pages[url.toString()] ?: run {
+            JinaReaderChannel.read(url, readerResponse("markdown")).also { pages[url.toString()] = it }
+        }
+        val text = content.text
+        if (requestedOffset > text.length) fail("invalid_range", "读取位置超过网页正文长度。")
+        val offset = characterStart(text, requestedOffset)
+        val result = success().put("url", url.toString()).put("source", url.host).put("title", content.title)
+            .put("provider", "jina-ai/reader-local")
+            .put("operation", operation).put("total_chars", text.length).put("source_truncated", content.truncated)
+        when (operation) {
+            "info" -> result
+            "search" -> {
+                val hits = JSONArray()
+                var next = offset
+                while (hits.length() < minOf(limit, 10)) {
+                    val found = text.indexOf(query, next, ignoreCase = true)
+                    if (found < 0) { next = text.length; break }
+                    val start = characterStart(text, maxOf(0, found - 160))
+                    val end = characterEnd(text, minOf(text.length, found + query.length + 160))
+                    hits.put(JSONObject().put("offset", found).put("snippet_offset", start).put("snippet", text.substring(start, end)))
+                    next = characterEnd(text, found + query.length)
+                }
+                result.put("hits", hits).put("offset", offset).put("next_offset", next)
+                    .put("has_more", next < text.length && text.indexOf(query, next, ignoreCase = true) >= 0)
+            }
+            else -> {
+                var end = characterStart(text, minOf(text.length.toLong(), offset.toLong() + limit).toInt())
+                if (end == offset && offset < text.length) end = minOf(text.length, offset + 2)
+                result.put("text", text.substring(offset, end)).put("offset", offset).put("next_offset", end)
+                    .put("has_more", end < text.length).put("truncated", end < text.length || content.truncated)
+            }
+        }
     }
+
+    private fun characterStart(text: String, at: Int): Int = if (at > 0 && at < text.length &&
+        Character.isHighSurrogate(text[at - 1]) && Character.isLowSurrogate(text[at])) at - 1 else at
+    private fun characterEnd(text: String, at: Int): Int = if (characterStart(text, at) != at) at + 1 else at
 
     private fun fetch(initial: HttpUrl, scope: Scope): WebResearchPage {
         var url = initial
@@ -134,9 +217,11 @@ class AndroidWebResearch internal constructor(private val transport: WebResearch
 }
 
 internal object WebResearchLimits {
-    const val MAX_BYTES = 1_048_576
+    const val MAX_BYTES = 5 * 1_048_576
+    const val MAX_PAGE_BYTES = 24 * 1_048_576
     const val MAX_TEXT = 10_000
     const val MAX_RESULTS = 6
+    const val MAX_DOCUMENT_CHARS = 200_000
 }
 
 internal class WebResearchFailure(val code: String, message: String) : IOException(message)
@@ -200,7 +285,11 @@ internal object WebResearchUrls {
 }
 
 internal data class WebResearchPage(val url: HttpUrl, val bytes: ByteArray, val contentType: String = "text/html",
-                                    val redirect: String? = null)
+                                    val redirect: String? = null, val headers: Map<String, String> = emptyMap(), val status: Int = 200)
+internal interface WebPageReader {
+    fun read(url: HttpUrl, format: String, deadline: Long, check: () -> Unit): WebResearchPage
+    fun cancel()
+}
 internal interface WebResearchTransport {
     fun fetch(url: HttpUrl, deadline: Long, check: () -> Unit): WebResearchPage
     fun cancel()
@@ -210,6 +299,7 @@ internal interface WebResearchTransport {
  * exact answers consumed by OkHttp, rather than a separate preflight lookup vulnerable to rebinding.
  */
 internal class PublicWebTransport(
+    private val debug: Boolean = false,
     private val resolve: (String) -> List<InetAddress> = { InetAddress.getAllByName(it).toList() }
 ) : WebResearchTransport {
     private val activeCall = AtomicReference<Call?>()
@@ -217,6 +307,19 @@ internal class PublicWebTransport(
     private val client = OkHttpClient.Builder().proxy(Proxy.NO_PROXY).cookieJar(CookieJar.NO_COOKIES)
         .authenticator(Authenticator.NONE).proxyAuthenticator(Authenticator.NONE)
         .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false)
+        .apply { if (debug) eventListenerFactory {
+            object : EventListener() {
+                private val started = System.nanoTime()
+                private fun record(call: Call, event: String, error: IOException? = null) {
+                    android.util.Log.i("DoppelReader", "Network host=${call.request().url.host} event=$event" +
+                        " elapsed_ms=${TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)}" +
+                        (error?.let { " error=${it.javaClass.simpleName}" } ?: ""))
+                }
+                override fun connectStart(call: Call, inetSocketAddress: InetSocketAddress, proxy: Proxy) = record(call, "connect_start")
+                override fun connectFailed(call: Call, inetSocketAddress: InetSocketAddress, proxy: Proxy, protocol: Protocol?, ioe: IOException) = record(call, "connect_failed", ioe)
+                override fun callFailed(call: Call, ioe: IOException) = record(call, "call_failed", ioe)
+            }
+        } }
         .connectTimeout(8, TimeUnit.SECONDS).readTimeout(8, TimeUnit.SECONDS).build()
 
     override fun cancel() {
@@ -224,7 +327,18 @@ internal class PublicWebTransport(
         activeDns.get()?.cancel(true)
     }
 
-    override fun fetch(url: HttpUrl, deadline: Long, check: () -> Unit): WebResearchPage {
+    override fun fetch(url: HttpUrl, deadline: Long, check: () -> Unit): WebResearchPage = fetch(url, deadline, check, false)
+
+    /** WebView resource loading uses the same public-address transport, with bounded binary bodies. */
+    fun fetchResource(url: HttpUrl, deadline: Long, check: () -> Unit): WebResearchPage = fetch(url, deadline, check, true)
+
+    fun fetchResource(url: HttpUrl, deadline: Long, check: () -> Unit, method: String,
+                      headers: Map<String, String>, body: ByteArray?, consumeBytes: (Int) -> Unit = {}): WebResearchPage =
+        fetch(url, deadline, check, true, method, headers, body, consumeBytes)
+
+    private fun fetch(url: HttpUrl, deadline: Long, check: () -> Unit, resource: Boolean, method: String = "GET",
+                      headers: Map<String, String> = emptyMap(), requestBody: ByteArray? = null,
+                      consumeBytes: (Int) -> Unit = {}): WebResearchPage {
         WebResearchUrls.parse(url.toString())
         check()
         val dns = object : Dns {
@@ -246,10 +360,13 @@ internal class PublicWebTransport(
             }
           }
         }
-        val call = client.newBuilder().dns(dns).build().newCall(Request.Builder().url(url)
-            .header("User-Agent", "Mozilla/5.0 (compatible; DoppelResearch/0.1)")
-            .header("Accept", "text/html,application/xhtml+xml,text/plain;q=0.8")
-            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.6").get().build())
+        val call = client.newBuilder().dns(dns)
+            // Let OkHttp try another validated address for safe reads; never replay page POSTs.
+            .retryOnConnectionFailure(method in setOf("GET", "HEAD", "OPTIONS"))
+            .build().newCall(resourceRequest(url, method, headers, requestBody).newBuilder()
+            .apply { if (headers.keys.none { it.equals("accept", true) })
+                header("Accept", if (resource) "*/*" else "text/html,application/xhtml+xml,text/plain;q=0.8") }
+            .build())
         val remaining = deadline - System.nanoTime()
         if (remaining <= 0) fail("deadline_exceeded", "联网读取超过时间上限。")
         call.timeout().timeout(remaining, TimeUnit.NANOSECONDS)
@@ -260,12 +377,13 @@ internal class PublicWebTransport(
                 check()
                 if (response.code in listOf(301, 302, 303, 307, 308)) {
                     val location = response.header("Location") ?: fail("invalid_redirect", "网页跳转缺少目标地址。")
-                    return WebResearchPage(url, byteArrayOf(), redirect = location)
+                    return WebResearchPage(url, byteArrayOf(), redirect = location, status = response.code)
                 }
-                if (!response.isSuccessful) fail("http_${response.code}", "网页服务返回 ${response.code}，暂时无法读取。")
+                // Page scripts must receive HTTP failures as responses, as native fetch/XHR do.
+                if (!resource && !response.isSuccessful) fail("http_${response.code}", "网页服务返回 ${response.code}，暂时无法读取。")
                 val body = response.body ?: fail("empty_page", "网页没有可读内容。")
                 val type = response.header("Content-Type").orEmpty()
-                WebResearchParsing.requireTextType(type)
+                if (!resource) WebResearchParsing.requireTextType(type)
                 if (body.contentLength() > WebResearchLimits.MAX_BYTES) fail("response_too_large", "网页体积超过读取上限。")
                 val output = ByteArrayOutputStream()
                 body.byteStream().use { input ->
@@ -274,31 +392,49 @@ internal class PublicWebTransport(
                         check()
                         val count = input.read(buffer)
                         if (count == -1) break
+                        consumeBytes(count)
                         if (output.size() + count > WebResearchLimits.MAX_BYTES)
                             fail("response_too_large", "网页体积超过读取上限。")
                         output.write(buffer, 0, count)
                     }
                 }
                 check()
-                return WebResearchPage(url, output.toByteArray(), type)
+                val headers = response.headers.names().filterNot {
+                    it.lowercase() in setOf("cookie", "set-cookie", "set-cookie2", "authorization", "proxy-authorization", "www-authenticate", "proxy-authenticate",
+                        "content-encoding", "content-length", "transfer-encoding")
+                }.associateWith { response.header(it).orEmpty() }
+                return WebResearchPage(url, output.toByteArray(), type, headers = headers, status = response.code)
             }
         } finally {
             activeCall.compareAndSet(call, null)
             call.cancel()
+            client.connectionPool.evictAll()
         }
     }
 
     companion object {
+        /** Website scripts receive only this bounded public-network capability, never app credentials. */
+        internal fun resourceRequest(url: HttpUrl, method: String, headers: Map<String, String>, body: ByteArray?): Request {
+            WebResearchUrls.parse(url.toString())
+            if (method !in setOf("GET", "HEAD", "POST", "OPTIONS")) fail("unsupported_request", "网页请求方法不受支持。")
+            if ((body?.size ?: 0) > 128 * 1024 || headers.size > 32 || headers.entries.sumOf { it.key.length + it.value.length } > 16384)
+                fail("request_too_large", "网页请求超过大小上限。")
+            val allowed = headers.filterKeys { it.lowercase() !in setOf("cookie", "cookie2", "authorization", "proxy-authorization",
+                "host", "connection", "content-length", "transfer-encoding", "accept-encoding", "upgrade", "trailer", "te") }
+            val builder = Request.Builder().url(url).header("User-Agent", "Mozilla/5.0 (compatible; DoppelResearch/0.1)")
+                .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.6")
+            allowed.forEach { (key, value) -> builder.header(key, value) }
+            val mime = allowed.entries.firstOrNull { it.key.equals("content-type", true) }?.value?.toMediaTypeOrNull()
+            return builder.method(method, if (method == "POST") (body ?: byteArrayOf()).toRequestBody(mime) else null).build()
+        }
         // DNS implementations may ignore interrupts. Never allow unbounded threads or queued work.
-        private val DNS_EXECUTOR = ThreadPoolExecutor(0, 2, 30, TimeUnit.SECONDS, SynchronousQueue(),
-            { runnable -> Thread(runnable, "doppel-public-dns").apply { isDaemon = true } })
+        private val DNS_EXECUTOR = ThreadPoolExecutor(2, 2, 30, TimeUnit.SECONDS, ArrayBlockingQueue(64),
+            { runnable -> Thread(runnable, "doppel-public-dns").apply { isDaemon = true } }).apply { allowCoreThreadTimeOut(true) }
     }
 }
 
 internal object WebResearchParsing {
     data class Text(val title: String, val text: String, val truncated: Boolean)
-    private val whitespace = Regex("[\\s\\u00a0]+")
-    private val challenge = Regex("captcha|人机验证|安全验证|访问验证|verify (?:you are|that you)|just a moment", RegexOption.IGNORE_CASE)
 
     fun requireTextType(type: String) {
         val mime = type.substringBefore(';').trim().lowercase()
@@ -306,7 +442,7 @@ internal object WebResearchParsing {
             fail("unsupported_content", "仅支持 HTML 或纯文本网页，不能读取此文件类型。")
     }
 
-    private fun document(page: WebResearchPage): Document {
+    fun document(page: WebResearchPage): Document {
         requireTextType(page.contentType)
         if (page.bytes.size > WebResearchLimits.MAX_BYTES) fail("response_too_large", "网页体积超过读取上限。")
         val charset = Regex("charset\\s*=\\s*[\"']?([^;\\s\"']+)", RegexOption.IGNORE_CASE)
@@ -323,66 +459,4 @@ internal object WebResearchParsing {
             .find(meta.attr("content"))?.groupValues?.get(1)?.trim()?.trim('\'', '"')
     }
 
-    fun search(page: WebResearchPage, provider: String): JSONArray {
-        val doc = document(page)
-        rejectChallenge(doc)
-        val headings = if (provider == "360") doc.select(".res-list h3.res-title a[href]")
-            else doc.select(".vrwrap h3.vr-title a[href], .rb h3 a[href]")
-        val seen = mutableSetOf<String>()
-        val out = JSONArray()
-        for (anchor in headings) {
-            val container = anchor.parents().firstOrNull {
-                it.hasClass("res-list") || it.hasClass("vrwrap") || it.hasClass("rb")
-            } ?: continue
-            // Prefer the explicitly published source URL over a search engine tracking redirect.
-            val raw = anchor.attr("data-mdurl").ifBlank { anchor.attr("data-url") }
-                .ifBlank { anchor.attr("href") }
-            val url = runCatching { WebResearchUrls.resolve(page.url, raw) }.getOrNull() ?: continue
-            if (url.host == "ai.so.com" || (url.host == page.url.host && url.encodedPath != "/link")) continue
-            val title = compact(anchor.text(), 160)
-            if (title.isBlank() || !seen.add(url.toString())) continue
-            val excerpt = container.select(".res-desc, .res-list-summary, [id^=cacheresult_summary], .text-layout, .str-text, .fz-mid")
-                .map { it.text() }.filter { it.isNotBlank() }.distinct().joinToString(" ")
-                .ifBlank { container.clone().apply { select("h3, script, style, .r-sech").remove() }.text() }
-            val source = container.select(".g-linkinfo-a, .citeLinkClass").firstOrNull()?.text().orEmpty()
-            out.put(JSONObject().put("title", title).put("url", url.toString())
-                .put("source", compact(source.ifBlank { url.host }, 120)).put("snippet", compact(excerpt, 450)))
-            if (out.length() >= WebResearchLimits.MAX_RESULTS) break
-        }
-        return out
-    }
-
-    fun read(page: WebResearchPage): Text {
-        requireTextType(page.contentType)
-        if (page.bytes.size > WebResearchLimits.MAX_BYTES) fail("response_too_large", "网页体积超过读取上限。")
-        if (page.contentType.substringBefore(';').trim().equals("text/plain", true)) {
-            val charsetName = Regex("charset=([^;\\s]+)", RegexOption.IGNORE_CASE).find(page.contentType)?.groupValues?.get(1)
-            val charset = charsetName?.let { runCatching { Charset.forName(it.trim('\'', '"')) }.getOrNull() } ?: Charsets.UTF_8
-            return boundedText(page.url.host, page.bytes.toString(charset))
-        }
-        val doc = document(page)
-        rejectChallenge(doc)
-        val title = compact(doc.title().ifBlank { doc.selectFirst("h1")?.text() ?: page.url.host }, 200)
-        doc.select("script, style, noscript, nav, header, footer, form, button, input, select, textarea, iframe, svg, canvas, [hidden], [aria-hidden=true]").remove()
-        val candidates = doc.select("article, main, [role=main], .article-content, .post-content, .entry-content, .Mid2L_con, #article, #content, .content")
-        val root = candidates.maxByOrNull { element ->
-            element.text().length - element.select("a").sumOf { it.text().length }
-        }?.takeIf { it.text().length >= 80 } ?: doc.body()
-        return boundedText(title, root.wholeText())
-    }
-
-    private fun boundedText(title: String, raw: String): Text {
-        val text = raw.lineSequence().map { compact(it, Int.MAX_VALUE) }.filter { it.isNotBlank() }
-            .joinToString("\n").trim()
-        if (text.length < 80) fail("insufficient_content", "该页面正文不足，可能需要登录、脚本加载或更换来源。")
-        return Text(title, text.take(WebResearchLimits.MAX_TEXT), text.length > WebResearchLimits.MAX_TEXT)
-    }
-
-    private fun rejectChallenge(doc: Document) {
-        if (challenge.containsMatchIn(doc.title()) ||
-            (doc.body().text().length < 2000 && challenge.containsMatchIn(doc.body().text())))
-            fail("verification_required", "来源要求访问验证，无法自动读取，请换用公开来源。")
-    }
-
-    private fun compact(text: String, limit: Int) = text.replace(whitespace, " ").trim().take(limit)
 }

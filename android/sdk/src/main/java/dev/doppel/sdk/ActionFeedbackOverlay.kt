@@ -45,7 +45,7 @@ internal class ActionFeedbackOverlay(private val context: Context) {
                     layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
                 }
             }
-            try { manager.addView(indicator, params); view = indicator; visible = true } catch (_: Exception) { visible = false }
+            try { TemporaryScreenshotExclusion.addView(manager, indicator, params); view = indicator; visible = true } catch (_: Exception) { visible = false }
             handler.postDelayed({ if (generation.get() == token) removeView() }, maxOf(1100,geometry.durationMs+400))
         }
         return token
@@ -69,9 +69,11 @@ internal class ActionFeedbackOverlay(private val context: Context) {
             }
             val params = WindowManager.LayoutParams(-2, -2, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
-                PixelFormat.TRANSLUCENT).apply { gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = UiTheme.dp(context, 88) }
+                PixelFormat.TRANSLUCENT).apply {
+                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = UiTheme.dp(context, 88)
+            }
             try {
-                manager.addView(toast, params); messageView = toast; visible = true
+                TemporaryScreenshotExclusion.addView(manager, toast, params); messageView = toast; visible = true
                 if (ValueAnimator.areAnimatorsEnabled()) { toast.alpha = 0f; toast.translationY = UiTheme.dp(context, 8).toFloat(); toast.animate().alpha(1f).translationY(0f).setDuration(160).start() }
             } catch (_: Exception) { visible = false }
             handler.postDelayed({ if (generation.get() == token) removeView() }, 1800)

@@ -18,15 +18,7 @@ object Policy {
         val action = "(?:enable|activate|authorize|set\\s*up|disable|cancel)"
         return manualFinancial.containsMatchIn(normalized) || Regex("\\b$action\\b.{0,20}\\b$mandate\\b|\\b$mandate\\b.{0,20}\\b$action\\b", RegexOption.IGNORE_CASE).containsMatchIn(normalized)
     }
-    fun paymentContext(labels: Iterable<String>) = labels.any { Regex("收银台|应付总额|支付金额|付款金额|待支付|确认付款|确认支付|cashier|checkout|payment|amount due", RegexOption.IGNORE_CASE).containsMatchIn(it) }
     fun financialCredential(label: String) = Regex("密码|口令|验证码|校验码|动态码|\\b(?:password|passcode|pin|otp)\\b|one.?time|verification.?code", RegexOption.IGNORE_CASE).containsMatchIn(label)
-    fun manualFinancialContext(labels: Iterable<String>, credentialInput: Boolean = false) = labels.any { manualFinancial(it) } || credentialInput && paymentContext(labels)
-    fun leavesFinancialScreen(label: String) = Regex("^(?:返回|取消|关闭)|^(?:back|cancel|close)\\b", RegexOption.IGNORE_CASE).containsMatchIn(label.trim())
-    fun paymentTarget(label: String, screenLabels: Iterable<String>): Boolean {
-        if (sensitive(label)) return true
-        val ambiguous = label.isBlank() || Regex("^(?:确认|确定|继续|提交|完成)|^(?:confirm|continue|submit|done|ok)\\b", RegexOption.IGNORE_CASE).containsMatchIn(label.trim())
-        return ambiguous && paymentContext(screenLabels)
-    }
     fun verificationRequired(labels: Iterable<String>) = labels.any { verificationLabel(it, false) }
     /** Strict product rule: the agent may never create a new third-party account. */
     fun registrationTarget(label: String): Boolean = registrationTarget.containsMatchIn(label.take(4000))
@@ -38,13 +30,17 @@ object Policy {
     fun codeInput(label: String) = Regex("验证码|校验码|动态码|one.?time|otp|verification.?code", RegexOption.IGNORE_CASE).containsMatchIn(label)
     fun phoneInput(label: String) = Regex("手机|电话|(?:^|[^a-z])(?:mobile|phone|telephone)(?:[^a-z]|$)", RegexOption.IGNORE_CASE).containsMatchIn(label)
     fun redactLoginLabel(label: String) = Regex("\\p{Nd}").replace(label, "*")
-    fun validate(kind: String, expected: String?, actual: String, target: Target?, mode: String = "assist", paymentAuthorized: Boolean = false): String {
+    /** Payment is an explicit planner action; the host checks authority, never page words. */
+    fun canPay(mode: String, paymentAuthorized: Boolean, packageName: String) =
+        mode == "full" && paymentAuthorized && packageName.isNotBlank() && !packageName.startsWith("window:")
+    fun validate(kind: String, expected: String?, actual: String, target: Target?, mode: String = "assist"): String {
         if (mode !in setOf("ask", "assist", "full")) return "blocked"
-        if (kind in setOf("tap", "long_press", "type", "login_phone", "login_code", "login_password", "scroll")) {
+        if (kind in setOf("tap", "long_press", "type", "login_phone", "login_code", "login_username", "login_password", "scroll")) {
             if (expected.isNullOrBlank() || expected != actual) return "stale"
             if (target == null) return "stale"
             if (target.password && kind != "login_password" && !(kind == "login_code" && codeInput(target.label)) || !target.enabled) return "blocked"
-            if (kind != "scroll" && (manualFinancial(target.label) || sensitive(target.label) && !(kind == "tap" && paymentAuthorized))) return "blocked"
+            // Credential field restrictions do not classify ordinary navigation as a payment.
+            if (kind in setOf("login_phone", "login_code", "login_username", "login_password") && manualFinancial(target.label)) return "blocked"
         }
         return "ok"
     }

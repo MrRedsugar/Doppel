@@ -13,8 +13,6 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-data class LoginProfile(val packageName: String, val phone: String, val signature: String, val enabled: Boolean)
-
 class LoginAssist(private val context: Context) {
     companion object {
         @Volatile var settingsVisible = false
@@ -66,25 +64,32 @@ class LoginAssist(private val context: Context) {
         write(read().put("phone", phone))
     }
     fun profiles(): List<LoginProfile> {
-        val values = read().optJSONArray("profiles") ?: JSONArray()
-        return (0 until values.length()).map { values.getJSONObject(it) }.map {
-            LoginProfile(it.getString("package"), it.optString("phone"), it.getString("signature"), it.optBoolean("enabled"))
+        val state = read()
+        val values = state.optJSONArray("profiles") ?: JSONArray()
+        val profiles = (0 until values.length()).map { values.getJSONObject(it) }.map {
+            LoginProfile(it.getString("package"), it.optString("phone"), it.optBoolean("enabled"),
+                it.optString("method", "sms"), it.optString("credential_id"))
         }
+        return if (state.optInt("version") >= 2) profiles
+            else mergeLegacyLoginProfiles(profiles, CredentialVault(context).configuredApplications())
     }
+    internal fun profileFor(packageName: String) = profiles().singleOrNull { it.packageName == packageName }
     fun save(profile: LoginProfile) {
         require(profile.packageName.matches(Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)+"))) { "应用包名不正确" }
         require(profile.phone.isEmpty() || profile.phone.matches(Regex("\\+?[1-9][0-9]{7,14}"))) { "手机号格式不正确" }
-        require(profile.signature.length in 2..40 && profile.signature.none { it.isISOControl() }) { "请填写短信中的服务名称" }
+        require(profile.method in setOf("sms", "password")) { "请选择登录方式" }
+        require(profile.credentialId.length <= 128) { "账号资料标识无效" }
         val all = profiles().filter { it.packageName != profile.packageName } + profile
         require(all.size <= 100) { "应用数量已达到上限" }
         writeProfiles(all)
     }
     fun remove(packageName: String) = writeProfiles(profiles().filter { it.packageName != packageName })
-    fun clearAll() { prefs.edit().clear().commit(); clearSession() }
+    fun clearAll() { write(JSONObject().put("version", 2).put("profiles", JSONArray())) }
     private fun writeProfiles(profiles: List<LoginProfile>) {
         val rows = JSONArray()
-        profiles.forEach { rows.put(JSONObject().put("package", it.packageName).put("phone", it.phone).put("signature", it.signature).put("enabled", it.enabled)) }
-        write(read().put("profiles", rows))
+        profiles.forEach { rows.put(JSONObject().put("package", it.packageName).put("phone", it.phone).put("enabled", it.enabled)
+            .put("method", it.method).put("credential_id", it.credentialId)) }
+        write(read().put("version", 2).put("profiles", rows))
     }
     fun notificationAccess(): Boolean = Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners")
         .orEmpty().split(':').any { android.content.ComponentName.unflattenFromString(it)?.let { component ->
@@ -93,28 +98,52 @@ class LoginAssist(private val context: Context) {
 
     /** Availability only. The run-bound code stays local and is not consumed by an observation. */
     internal fun taskStatus(packageName: String, runId: String? = null): JSONObject = runCatching {
-        val profile = profiles().singleOrNull { it.packageName == packageName && it.enabled }
-        val state = session.readiness(packageName, runId.orEmpty())
+        val selected = profileFor(packageName)
+        val profile = selected?.takeIf { it.enabled && it.method == "sms" }
+        val sessionPackage = packageName.takeIf { profile != null }.orEmpty()
+        val state = session.readiness(sessionPackage, runId.orEmpty())
+        val candidates = JSONArray()
+        session.candidates(sessionPackage, runId.orEmpty()).forEach { candidate ->
+            candidates.put(JSONObject().put("candidate_id", candidate.id).put("context", candidate.context)
+                .put("age_ms", candidate.ageMs))
+        }
         JSONObject().put("package_name", packageName).put("enabled", profile != null)
+            .put("login_configured", selected != null && selected.method.isNotBlank()).put("login_method", selected?.method.orEmpty())
             .put("phone_available", profile != null && (profile.phone.isNotBlank() || commonPhone().isNotBlank()))
             .put("notification_access", notificationAccess()).put("session_started", state.active)
             .put("code_ready", state.codeReady).put("code_state", state.state).put("expires_in_ms", state.expiresInMs)
+            .put("code_candidates", candidates)
     }.getOrElse { JSONObject().put("package_name", packageName).put("enabled", false).put("phone_available", false)
-        .put("notification_access", notificationAccess()).put("session_started", false).put("code_ready", false).put("code_state", "inactive").put("expires_in_ms", 0) }
+        .put("login_configured", false).put("login_method", "")
+        .put("notification_access", notificationAccess()).put("session_started", false).put("code_ready", false).put("code_state", "inactive").put("expires_in_ms", 0).put("code_candidates", JSONArray()) }
 
-    fun valueFor(kind: String, packageName: String, runId: String): String? {
+    fun valueFor(kind: String, packageName: String, runId: String, codeCandidateId: String? = null, startCodeSession: Boolean = true): String? {
         require(kind in setOf("login_phone", "login_code"))
-        val profile = profiles().firstOrNull { it.packageName == packageName && it.enabled }
-            ?: throw IllegalStateException("请先在登录辅助中授权此应用")
+        val profile = profileFor(packageName)?.takeIf { it.enabled && it.method == "sms" }
+            ?: throw IllegalStateException("请先在登录设置中为此应用开启短信验证码登录")
         if (kind == "login_phone") {
             val phone = profile.phone.ifBlank { commonPhone() }
             check(phone.isNotEmpty()) { "请先设置常用手机号" }
             session.protectPassword(phone)
-            session.begin(packageName, runId, phone, profile.signature)
-            scheduleCleanup()
+            // Legacy gateways start on input; current visual tasks start on the actual send tap.
+            if (startCodeSession) { session.begin(packageName, runId, phone); scheduleCleanup() } else session.clear()
             return phone
         }
         check(notificationAccess()) { "请先授权短信通知访问，或手动输入验证码" }
-        return session.consume(packageName, runId)
+        return session.consume(packageName, runId, codeCandidateId)
+    }
+
+    /** Called immediately before the authorized send/resend tap, including prefilled phone fields. */
+    internal fun beginCodeRequest(packageName: String, runId: String): String {
+        require(runId.isNotBlank())
+        val keyguard = context.getSystemService(android.app.KeyguardManager::class.java)
+        check(DeviceWorkerService.instance?.allowsCredentialInput(runId) == true &&
+            !keyguard.isKeyguardLocked && !keyguard.isDeviceLocked && !DirectMode.settingsVisible && !settingsVisible) {
+            "当前任务或设备状态不允许读取登录验证码"
+        }
+        val profile = profileFor(packageName)?.takeIf { it.enabled && it.method == "sms" }
+            ?: error("请先在登录设置中为此应用开启短信验证码登录")
+        check(notificationAccess()) { "请先授权短信通知访问，或手动输入验证码" }
+        return session.begin(packageName, runId, profile.phone.ifBlank { commonPhone() }).also { scheduleCleanup() }
     }
 }

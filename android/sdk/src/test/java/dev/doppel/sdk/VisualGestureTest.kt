@@ -57,8 +57,9 @@ class VisualGestureTest {
     }
     @Test fun missingSafetyOrPaymentVerificationAndSensitiveInputAreNeverAuthorized() {
         assertNull(VisualGesture.parse(candidate()).blockedReason(emptyList(), false))
-        assertEquals("payment", VisualGesture.parse(candidate().put("label", "确认支付")).blockedReason(emptyList(), false))
-        assertEquals("payment", VisualGesture.parse(candidate()).blockedReason(listOf("收银台"), false))
+        assertNull(VisualGesture.parse(candidate().put("label", "查看待付款订单")).blockedReason(emptyList(), false))
+        assertEquals("payment", VisualGesture.parse(candidate().put("safety", "payment")).blockedReason(emptyList(), false))
+        assertNull(VisualGesture.parse(candidate()).blockedReason(listOf("收银台"), false))
         assertEquals("verification", VisualGesture.parse(candidate()).blockedReason(listOf("安全验证"), false))
         assertEquals("sensitive", VisualGesture.parse(candidate()).blockedReason(emptyList(), true))
         assertEquals("uncertain", VisualGesture.parse(candidate().put("safety", "uncertain")).blockedReason(emptyList(), false))

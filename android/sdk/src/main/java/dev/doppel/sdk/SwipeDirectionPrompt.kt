@@ -11,6 +11,7 @@ internal object SwipeDirectionPrompt {
 明确要求的物理手势 → 实际手指路径
 向左滑动 → 右到左；向右滑动 → 左到右。
 手指向下拖 / 下拉通知栏 / 下拉刷新 → 上到下，不反转。明确手指方向和朝向选择使用physical_gesture；对象从起点拖到指定落点使用object_drag，target同时描述源对象与目标落点，按两者实际位置执行。
+start_hold_ms由A明确选择起点按住后再移动的时间，范围0..3000毫秒；普通滚动及physical_gesture必须为0。object_drag需要先长按激活（如移动桌面图标或列表排序）通常取600–1000毫秒，宿主执行时至少满足设备长按阈值，再不松手移动到终点；直接拖动的滑块等取0。duration_ms仅表示移动时长，不含起点按住时间。swipe_sequence在每段gesture_contracts内分别填写，不能拆成先long_press松手再swipe。
 先确定是在描述“想看哪边的内容”还是“手指往哪边走”，再使用上述路径。寻找更早条目先结合可见顺序判断在哪边；目标在左侧不等于手指左滑。只有实际观察支持特殊交互时才调整规则，不凭空假定轮播或游戏反向。
 target 说明可见操作区域和手指起止方向；expected 说明希望露出的内容或变化。两者必须一致。旧 last_intent 和旧路径只是先前尝试，不能代替本轮方向判断。连续滑动逐段遵循同一约定。
 浏览时target_relative_direction指“希望找到的内容相对当前可见内容在哪一侧”，不是可拖动背景区域的位置，也不是手指运动方向。object_drag时该字段指目标落点相对源对象的方位，与实际手指方向同向；无法准确估计可为unknown，由B按同一源对象和落点细化并记录修正。intended_finger_direction / required_finger_direction均指手指从轨迹起点到终点的实际运动。先依据截图确定对象及方位，再明确手指运动，最后据此生成轨迹；expected的描述也必须一致。

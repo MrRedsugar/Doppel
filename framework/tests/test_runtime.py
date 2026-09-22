@@ -20,6 +20,25 @@ def make_run(runtime, owner="alice", mode="full"):
     return device, run
 
 
+@pytest.mark.parametrize("extension", [False, True])
+def test_declined_approval_stays_paused_until_explicit_resume(runtime, extension):
+    device, run = make_run(runtime, mode="ask")
+    if extension:
+        request_id = "extension-approval"
+        runtime.set_status(run.id, "awaiting_approval", pending_request={
+            "id": request_id, "kind": "approval", "extension": {"name": "test.tool"}})
+    else:
+        request_id = runtime.queue_command(run.id, "launch", package_name="test.app").id
+    answered = runtime.answer("alice", run.id, request_id, approve=False)
+    assert answered.status == "paused"
+    assert answered.pending_request is None
+    assert runtime.next_command("alice", device.id) is None
+    with pytest.raises(Conflict):
+        runtime.answer("alice", run.id, request_id, approve=True)
+    assert runtime.resume_run("alice", run.id).status == "running"
+    assert runtime.next_command("alice", device.id) is None  # Refused action is not replayed.
+
+
 def test_foreign_account_cannot_use_device_or_read_run(runtime):
     device, run = make_run(runtime)
     with pytest.raises(NotFound):
@@ -30,10 +49,11 @@ def test_foreign_account_cannot_use_device_or_read_run(runtime):
 
 def test_one_device_cannot_execute_two_active_runs(runtime):
     device, run = make_run(runtime)
-    with pytest.raises(Conflict):
-        runtime.create_run("alice", device.id, "Another task", "full")
+    queued = runtime.create_run("alice", device.id, "Another task", "full")
+    assert queued.status == "queued"
     runtime.cancel_run("alice", run.id)
-    assert runtime.create_run("alice", device.id, "Next task", "full").id != run.id
+    assert runtime.get_run("alice", queued.id).status == "queued"
+    assert runtime.start_queued("alice",queued.id).status == "running"
 
 
 def test_automatic_run_is_a_task_without_conversation_history(runtime):
@@ -45,7 +65,7 @@ def test_automatic_run_is_a_task_without_conversation_history(runtime):
     assert run.source == "trigger"
     assert run.conversation_messages == []
     assert runtime.conversation("alice", run.id) == []
-    runtime.set_status(run.id, "running", "正在执行自动任务")
+    runtime.start_queued("alice",run.id)
     updated = runtime.get_run("alice", run.id)
     assert updated.conversation_messages == []
 
@@ -120,7 +140,7 @@ def test_observation_is_stored_only_for_matching_result(runtime):
 
 
 @pytest.mark.parametrize("state", ["running", "paused", "awaiting_approval", "awaiting_input"])
-async def test_restart_terminates_orphan_runs_without_dispatch(runtime, state):
+async def test_restart_pauses_orphan_runs_without_dispatch(runtime, state):
     device, run = make_run(runtime, mode="ask" if state == "awaiting_approval" else "full")
     command = runtime.queue_command(run.id, "launch", package_name="test.app")
     if state in {"paused", "awaiting_input"}:
@@ -129,7 +149,7 @@ async def test_restart_terminates_orphan_runs_without_dispatch(runtime, state):
     restarted = DoppelRuntime(runtime.config)
     try:
         recovered = restarted.get_run("alice", run.id)
-        assert recovered.status == "failed"
+        assert recovered.status == "paused"
         assert recovered.pending_request is None
         assert "restart" in recovered.message.lower()
         result = restarted.command_result(command.id)
@@ -152,12 +172,12 @@ async def test_restart_preserves_terminal_runs(runtime, state):
         await restarted.close()
 
 
-async def test_restart_releases_device_with_no_outstanding_command(runtime):
+async def test_restart_preserves_interrupted_head_without_outstanding_command(runtime):
     device, run = make_run(runtime)
     await runtime.close()
     restarted = DoppelRuntime(runtime.config)
     try:
-        assert restarted.get_run("alice", run.id).status == "failed"
+        assert restarted.get_run("alice", run.id).status == "paused"
         assert restarted.create_run("alice", device.id, "Next task", "full").id != run.id
     finally:
         await restarted.close()
@@ -307,7 +327,7 @@ def test_payment_cannot_be_dispatched_even_after_answer(runtime, mode):
     observed = runtime.queue_command(run.id, "observe")
     observation = Observation(screen_id="pay", package_name="test.app", width=100, height=200, nodes=[Node(id="pay", text="Pay $28.00", bounds=[0, 0, 100, 100], clickable=True)])
     runtime.submit_result("alice", device.id, CommandResult(command_id=observed.id, run_id=run.id, status="ok", observation=observation))
-    command = runtime.queue_command(run.id, "tap", screen_id="pay", target="pay")
+    command = runtime.queue_command(run.id, "pay", screen_id="pay", target="pay")
     assert runtime.get_run("alice", run.id).status == "paused"
     with pytest.raises(Conflict):
         runtime.answer("alice", run.id, command.id, approve=True)

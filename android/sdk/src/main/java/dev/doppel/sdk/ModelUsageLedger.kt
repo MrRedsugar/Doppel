@@ -23,10 +23,12 @@ internal class ModelUsageLedger(private val root: File, private val now: () -> L
         val state = JSONObject().put("version", 1).put("started_at", now()).put("daily", JSONArray())
             .put("input_tokens", 0L).put("output_tokens", 0L).put("requests", 0L).put("unknown_usage_requests", 0L)
         // This is an explicit one-time lower bound, not a reconstruction of deleted history.
-        val legacy = File(root, "direct-runs-v1.json")
+        // AtomicFile's committed backup wins over a missing or interrupted base file.
+        val legacy = File(root, "direct-runs-v1.json.bak").takeIf(File::exists)
+            ?: File(root, "direct-runs-v1.json")
         if (legacy.exists()) {
             check(legacy.length() <= 2 * 1024 * 1024) { "原任务用量无法读取" }
-            val runs = JSONArray(legacy.readText())
+            val runs = SplitTaskEngine.readPersistedRuns(legacy.readText())
             repeat(runs.length()) { index ->
                 val run = runs.getJSONObject(index)
                 add(state, day(run.optLong("created_at", now())), count(run, "prompt_tokens"), count(run, "completion_tokens"), count(run, "calls"))

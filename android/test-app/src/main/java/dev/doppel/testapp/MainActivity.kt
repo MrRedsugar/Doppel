@@ -38,9 +38,19 @@ class MainActivity : Activity() {
         button("动态页面") { dynamicPage() }
         button("授权边界验证") { delegatedPayment() }
         button("密码填写验证") { credentialInput() }
+        button("登录验证门控测试") { loginVerificationGate() }
         button("验证码通知验证") { notificationInput() }
         button("剪贴板读取验证") { clipboardInput() }
         button("重置测试数据") { store.edit().clear().commit(); home() }
+    }
+    private fun loginVerificationGate() {
+        screen("安全验证")
+        label("仅验证本机手势许可，不连接验证码服务", 14f)
+        var clicks = 0
+        val counter = TextView(this).apply { text = "挑战点击计数 0"; textSize = 20f }
+        page.addView(counter)
+        button("记录测试点击") { counter.text = "挑战点击计数 ${++clicks}" }
+        button("返回场景") { home() }
     }
     private fun notificationInput() {
         screen("验证码通知验证")
@@ -97,13 +107,21 @@ class MainActivity : Activity() {
     private fun credentialInput(financial: Boolean = false) {
         screen(if (financial) "支付密码" else "登录密码")
         label("仅验证本机测试控件，不连接账号或网络", 14f)
+        val account = EditText(this).apply {
+            hint = "登录账号"; contentDescription = "测试账号输入框"
+            inputType = android.text.InputType.TYPE_CLASS_TEXT
+        }
+        page.addView(account)
         val password = EditText(this).apply {
             hint = if (financial) "支付密码" else "登录密码"
             contentDescription = "测试密码输入框"
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
         page.addView(password)
-        val status = TextView(this).apply { text = "尚未验证"; textSize = 17f }
+        val status = TextView(this).apply {
+            text = "尚未验证"; textSize = 17f; contentDescription = "测试输入状态"
+            isFocusableInTouchMode = true
+        }
         page.addView(status)
         button("验证测试输入") { status.text = if (password.text.toString() == "fixture-only-password-two") "测试内容匹配" else if (password.text.isEmpty()) "输入框为空" else "测试内容不匹配" }
         button("显示密码（保留类型）") { password.transformationMethod = null }
@@ -117,7 +135,7 @@ class MainActivity : Activity() {
         }
         button("清除回显") { status.text = "回显已清除"; status.contentDescription = null; status.hint = null; if (Build.VERSION.SDK_INT >= 30) status.stateDescription = null }
         button(if (financial) "切换登录密码" else "切换支付密码") { credentialInput(!financial) }
-        button("返回场景") { password.setText(""); home() }
+        button("返回场景") { account.setText(""); password.setText(""); home() }
     }
     private fun delegatedPayment() {
         screen("授权边界收银台")

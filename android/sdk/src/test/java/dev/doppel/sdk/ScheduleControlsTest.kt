@@ -47,7 +47,7 @@ class ScheduleControlsTest {
         engine.tick(port, onlyId = selected)
         assertEquals(1, port.calls)
         assertEquals(0, engine.get(first).getJSONArray("history").length())
-        assertEquals("started", engine.get(selected).getJSONArray("history").getJSONObject(0).getString("status"))
+        assertEquals("queued", engine.get(selected).getJSONArray("history").getJSONObject(0).getString("status"))
     }
     @Test fun failedImmediateChoiceClearsApprovalWithoutSkippingTheOccurrence() {
         var now = 100000L

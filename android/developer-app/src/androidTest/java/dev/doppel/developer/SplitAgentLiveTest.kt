@@ -101,23 +101,6 @@ class SplitAgentLiveTest {
         }
     }
 
-    /** Explicit cleanup after a native process exit skipped configureAndRun's finally block. */
-    @Test fun restoreSkillsAfterInterruptedTest() {
-        val args=InstrumentationRegistry.getArguments()
-        org.junit.Assume.assumeTrue(args.getString("restore_isolated_skills")=="true")
-        val context=InstrumentationRegistry.getInstrumentation().targetContext
-        check(!DirectRuntime.get(context).hasUnfinishedRun()) {"End the interrupted task before restoring its Skills"}
-        val snapshot=File(context.filesDir,"split-live-skills-before.json")
-        if(!snapshot.exists()) return
-        val saved=JSONObject(snapshot.readText()).getJSONObject("enabled")
-        val skills=DirectSkills(context)
-        val names=skills.enabledState().keys
-        saved.keys().asSequence().forEach { name -> if(name in names) skills.setEnabled(name,saved.getBoolean(name)) }
-        val restored=skills.enabledState()
-        check(saved.keys().asSequence().all { name -> name !in restored || restored[name]==saved.getBoolean(name) })
-        check(snapshot.delete())
-    }
-
     @Test fun configureAndRun() {
         val args=InstrumentationRegistry.getArguments()
         org.junit.Assume.assumeTrue(args.getString("split_live")=="true" && args.getString("configure_models_only")!="true")
@@ -129,22 +112,9 @@ class SplitAgentLiveTest {
         val started=SystemClock.elapsedRealtime();var id:String?=null
         val gateway=Gateway(context)
         val unassisted=args.getString("unassisted")=="true"
-        val selectedSkill=args.getString("skill")
-        require(selectedSkill==null || selectedSkill.matches(Regex("[A-Za-z0-9_-]{1,50}"))) {"Invalid selected skill name"}
-        require(selectedSkill==null || !unassisted) {"Single-skill and unassisted isolation are mutually exclusive"}
-        require(selectedSkill==null || listOf("primary_model","primary_provider","enhancement").none {args.containsKey(it)}) {"Configure model routing separately before a single-skill test"}
-        val skills=DirectSkills(context)
-        val skillSnapshot=File(context.filesDir,"split-live-skills-before.json")
-        var skillState:Map<String,Boolean>?=null
         var modelRoutingBefore:ModelRouting?=null
         var modelSetupVerified=false
-        val preservedRouting=if(selectedSkill!=null) ModelProviders(context).routing() else null
         report.put("unassisted",unassisted)
-        fun restoreSkillState(saved:Map<String,Boolean>) {
-            val current=skills.enabledState()
-            saved.forEach { (name,enabled) -> if(name in current) skills.setEnabled(name,enabled) }
-            check(saved.all { (name,enabled) -> name !in skills.enabledState() || skills.enabledState()[name]==enabled })
-        }
         var stage="setup"
         try {
             check(FirstUseConsent.accept(context));FirstUseConsent.finishGuide(context)
@@ -156,15 +126,7 @@ class SplitAgentLiveTest {
                 if(old.optString("status") !in setOf("completed","failed","cancelled")) gateway.request("POST","/runs/${old.getString("id")}/cancel",JSONObject())
             }
             check(!DirectRuntime.get(context).hasUnfinishedRun()) {"Unrelated unfinished task must be preserved"}
-            // A native crash skips finally. Recover only this harness's durable
-            // switch snapshot after its previous task has been stopped above.
-            if(skillSnapshot.exists()) {
-                val saved=JSONObject(skillSnapshot.readText()).getJSONObject("enabled")
-                restoreSkillState(saved.keys().asSequence().associateWith { saved.getBoolean(it) })
-                check(skillSnapshot.delete())
-                report.put("interrupted_skill_state_restored",true)
-            }
-            if(selectedSkill==null && keyFile.exists()) {
+            if(keyFile.exists()) {
                 val bytes=keyFile.readBytes()
                 try { models.saveProvider(ModelProvider.qwen(),String(bytes,Charsets.UTF_8).trim(),emptyMap()) }
                 finally {bytes.fill(0);check(keyFile.delete())}
@@ -220,46 +182,7 @@ class SplitAgentLiveTest {
             if(Build.VERSION.SDK_INT in 26..29 && !LegacyScreenCaptureService.isReady) LegacyCaptureConsent.authorize(ins)
             stage="direct_mode"
             if(!DirectMode.isEnabled(context)) DirectMode.configure(context,true)
-            if(unassisted || selectedSkill!=null) {
-                stage="isolate_skills"
-                skillState=skills.enabledState()
-                if(selectedSkill!=null) check(selectedSkill in skillState!!) {"Selected skill must be installed before testing"}
-                skillSnapshot.writeText(JSONObject().put("saved_at",System.currentTimeMillis())
-                    .put("selected_skill",selectedSkill ?: JSONObject.NULL)
-                    .put("enabled",JSONObject(skillState!!)).toString(2))
-                skillState!!.keys.forEach { skills.setEnabled(it,it==selectedSkill) }
-            }
-            if(unassisted) {
-                check(skills.list().getJSONArray("items").length()==0)
-                check(!skills.relevant(goal,"","").optBoolean("found"))
-                skillState!!.keys.forEach { name ->
-                    check(skills.read(name).optString("error")=="skill_disabled")
-                    check(skills.resource(name,"references/evidence.json").optString("error")=="skill_disabled")
-                }
-                report.put("skills_isolation",JSONObject().put("all_disabled",true)
-                    .put("disabled_count",skillState!!.size).put("catalogue_empty",true)
-                    .put("skill_reference_found",false).put("direct_read_blocked",true).put("resource_read_blocked",true))
-            }
-            if(selectedSkill!=null) {
-                stage="selected_skill_preflight"
-                check(skills.enabledState().filterValues {it}.keys==setOf(selectedSkill)) {"Only the selected skill may be enabled"}
-                val catalogue=skills.list().getJSONArray("items")
-                check(catalogue.length()==1 && catalogue.getJSONObject(0).getString("name")==selectedSkill)
-                val loaded=skills.read(selectedSkill)
-                check(loaded.optBoolean("found") && !loaded.optBoolean("truncated")) {"Selected skill must be fully readable"}
-                val revision=loaded.getString("revision")
-                val reference=skills.relevant(goal,"","")
-                val relevant=singleSkillReference(reference,selectedSkill,revision)
-                report.put("skills_isolation",JSONObject().put("mode","single_skill").put("selected_name",selectedSkill)
-                    .put("revision",revision).put("all_others_disabled",true).put("enabled_names",JSONArray().put(selectedSkill))
-                    .put("instructions_sha256",sha256(loaded.getString("instructions")))
-                    .put("instruction_chars",loaded.getString("instructions").length)
-                    .put("read_preflight_passed",true).put("relevant_preflight",relevant)
-                    .put("runtime_injection_verified",false))
-                check(ModelProviders(context).routing()==preservedRouting) {"Single-skill test must preserve model routing"}
-                report.put("model_routing_preserved",true)
-            }
-            if(args.getString("fresh_conversation")=="true" || unassisted || selectedSkill!=null) {
+            if(args.getString("fresh_conversation")=="true" || unassisted) {
                 gateway.startNewConversation()
                 report.put("fresh_conversation",true)
                 check(gateway.selectedConversationRun().isNullOrEmpty())
@@ -298,18 +221,6 @@ class SplitAgentLiveTest {
                     val run=gateway.request("GET","/runs/$it")
                     if(unassisted) {
                         check(run.optString("parent_run_id").isBlank()) {"Unassisted run must not inherit earlier tasks"}
-                        check(skills.enabledState().values.none { it }) {"Skills changed during an unassisted run"}
-                    }
-                    if(selectedSkill!=null) {
-                        check(run.optString("parent_run_id").isBlank()) {"Single-skill run must not inherit earlier tasks"}
-                        check(skills.enabledState().filterValues {enabled -> enabled}.keys==setOf(selectedSkill)) {"Skills changed during a single-skill run"}
-                        check(ModelProviders(context).routing()==preservedRouting) {"Model routing changed during a single-skill run"}
-                        val isolation=report.getJSONObject("skills_isolation")
-                        if(!isolation.optBoolean("runtime_injection_verified")) {
-                            captureInjectedSkill(context,it,selectedSkill,isolation.getString("revision"))?.let { reference ->
-                                isolation.put("runtime_injection_verified",true).put("runtime_reference",reference)
-                            }
-                        }
                     }
                     report.put("run",run).put("elapsed_ms",SystemClock.elapsedRealtime()-started);evidence.writeText(report.toString(2))
                 }
@@ -333,61 +244,16 @@ class SplitAgentLiveTest {
                 }
                 report.put("run",gateway.request("GET","/runs/$it"))
             }}
-            skillState?.let { saved ->
-                try {
-                    id?.let { check(gateway.request("GET","/runs/$it").optString("status")!="running") {"Stop the isolated run before restoring Skills"} }
-                    restoreSkillState(saved)
-                    check(skillSnapshot.delete())
-                    report.put("skill_state_restored",true)
-                } catch(failure:Throwable) {
-                    report.put("skill_state_restored",false).put("skill_restore_error",failure.javaClass.simpleName)
-                    // Keep the durable snapshot for a later explicit harness run.
-                }
-            }
             report.put("elapsed_ms",SystemClock.elapsedRealtime()-started);evidence.writeText(report.toString(2))
-            if(selectedSkill==null && keyFile.exists()) keyFile.delete()
+            if(keyFile.exists()) keyFile.delete()
             ins.sendStatus(0,Bundle().apply {putString("stream","\nEvidence: files/split-live-latest.json\n")})
         }
         assertEquals("Actual business result still requires screenshot review","completed",report.optJSONObject("run")?.optString("status"))
-        if(unassisted || selectedSkill!=null) assertTrue("Skills must be restored after the isolated test",report.optBoolean("skill_state_restored"))
-        if(selectedSkill!=null) assertTrue("The selected skill must appear in an actual A request",report.getJSONObject("skills_isolation").optBoolean("runtime_injection_verified"))
         val completed=report.getJSONObject("run")
         val enhanced=report.getBoolean("enhancement_enabled")
         assertEquals(if(enhanced) "ab" else "direct",completed.getString("execution_mode"))
         val groundingCalls=completed.optJSONObject("model_metrics")?.optJSONObject("grounding")?.optInt("calls")?:0
         if(!enhanced) assertEquals("Disabled enhancement must never request B",0,groundingCalls)
-    }
-
-    private fun sha256(text:String)=java.security.MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
-        .joinToString("") {"%02x".format(it.toInt() and 255)}
-
-    private fun singleSkillReference(reference:JSONObject,name:String,revision:String):JSONObject {
-        val items=reference.optJSONArray("items") ?: JSONArray()
-        check(reference.optBoolean("found") && items.length()==1) {"The exact selected skill must be relevant to the task"}
-        val item=items.getJSONObject(0)
-        check(item.getString("name")==name && item.getString("revision")==revision) {"Injected skill identity or revision differs"}
-        val instructions=item.getString("instructions")
-        check(instructions.isNotBlank()) {"Skill reference has no instructions"}
-        return JSONObject().put("name",name).put("revision",revision).put("instructions_sha256",sha256(instructions))
-            .put("instruction_chars",instructions.length)
-    }
-
-    /** Observe the production request once; never change its context, screenshot, or model work. */
-    private fun captureInjectedSkill(context:android.content.Context,runId:String,name:String,revision:String):JSONObject? {
-        val runtime=DirectRuntime.get(context)
-        val engine=runtime.javaClass.getDeclaredField("engine").apply {isAccessible=true}.get(runtime)
-        return synchronized(engine) {
-            val work=engine.javaClass.getDeclaredField("working").apply {isAccessible=true}.get(engine) ?: return@synchronized null
-            if(work.javaClass.getMethod("getRunId").invoke(work)!=runId ||
-                work.javaClass.getMethod("getGrounding").invoke(work)==true ||
-                work.javaClass.getMethod("getLocalTool").invoke(work)!=null) return@synchronized null
-            val payload=work.javaClass.getMethod("getPayload").invoke(work) as JSONObject
-            val messages=payload.getJSONArray("messages")
-            val content=messages.getJSONObject(messages.length()-1).getJSONArray("content")
-            val modelContext=JSONObject(content.getJSONObject(0).getString("text"))
-            singleSkillReference(modelContext.getJSONObject("skill_reference"),name,revision)
-                .put("source","production_A_request").put("observed_at",System.currentTimeMillis())
-        }
     }
 
     private fun applyPrimarySelection(context:android.content.Context,models:ModelProviders,args:Bundle,report:JSONObject) {

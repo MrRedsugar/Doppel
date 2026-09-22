@@ -13,9 +13,11 @@ import android.widget.ScrollView
 internal class PauseActionSheet(context: Context, info: PausePresentation,
                                headingTitle: String = if (info.userInitiated) "任务待续" else info.category,
                                progressRun: org.json.JSONObject? = null,
+                               openLoginSettings: (() -> Unit)? = null,
                                action: (String) -> Unit) : LinearLayout(context) {
     private val end: Button
     private val continueTask: Button
+    private var loginSettings: Button? = null
     private val feedback = UiTheme.text(context, "", 13f, UiTheme.muted).apply {
         visibility = View.GONE
         setPadding(0, dp(12), 0, 0)
@@ -49,6 +51,11 @@ internal class PauseActionSheet(context: Context, info: PausePresentation,
         }.apply { isFillViewport = false; clipToPadding = false; addView(text) }
         addView(scroll, LayoutParams(-1, -2, 1f))
         addView(feedback)
+        if (info.showLoginSettings && openLoginSettings != null) {
+            loginSettings = UiTheme.command(context, "设置登录方式") { openLoginSettings() }.also {
+                addView(it, LayoutParams(-1, dp(48)).apply { topMargin = dp(16) })
+            }
+        }
         val actions = LinearLayout(context).apply { setPadding(0, dp(20), 0, 0) }
         end = UiTheme.command(context, "结束") { action("cancel") }
         continueTask = UiTheme.command(context, "继续", true) { action("resume") }
@@ -57,12 +64,12 @@ internal class PauseActionSheet(context: Context, info: PausePresentation,
         addView(actions)
     }
     fun submitting(action: String) {
-        end.isEnabled = false; continueTask.isEnabled = false
+        end.isEnabled = false; continueTask.isEnabled = false; loginSettings?.isEnabled = false
         if (action == "cancel") end.text = "结束中…" else continueTask.text = "继续中…"
         feedback.visibility = View.GONE
     }
     fun failed(message: String) {
-        end.isEnabled = true; continueTask.isEnabled = true
+        end.isEnabled = true; continueTask.isEnabled = true; loginSettings?.isEnabled = true
         end.text = "结束"; continueTask.text = "继续"
         feedback.text = message; feedback.visibility = View.VISIBLE
     }

@@ -37,7 +37,8 @@ internal object SplitOutputSchema {
         .put("required", JSONArray(fields.keys.toList())).put("additionalProperties", false)
     private fun points(min: Int, max: Int) = array(array(JSONObject().put("type", "number").put("minimum", 0).put("maximum", 1000), 2, 2), min, max)
     private fun plannerDirection() = obj("gesture_semantics" to enum("reveal_content", "physical_gesture", "object_drag"),
-        "target_relative_direction" to enum(*(directions + "unknown").toTypedArray()), "intended_finger_direction" to enum(*directions.toTypedArray()))
+        "target_relative_direction" to enum(*(directions + "unknown").toTypedArray()), "intended_finger_direction" to enum(*directions.toTypedArray()),
+        "start_hold_ms" to integer(0, 3000))
     private fun grounderDirection() = obj("target_relative_direction" to enum(*(directions + "unknown").toTypedArray()),
         "required_finger_direction" to enum(*directions.toTypedArray()), "direction_corrected" to JSONObject().put("type", "boolean"))
     private fun copyProperties(schema: JSONObject, into: MutableMap<String, JSONObject>) {
@@ -49,19 +50,26 @@ internal object SplitOutputSchema {
         require(role in setOf("primary", "grounding")) { "结构化输出角色无效" }
         if (expectedAction != null) require(expectedAction in actions) { "结构化输出动作无效" }
         val schema = if (role == "primary") {
-            val branches = actions.map { plannerExecute(it, direct) }.toMutableList()
+            val branches = plannerBranches(direct).toMutableList()
             branches += obj("kind" to enum("wait"), "duration_ms" to integer(100, 30000), "reason" to string(500),
                 "wait_condition" to string(500), "evidence" to string(700))
             branches += obj("kind" to enum("finish"), "status" to enum("completed", "failed"), "message" to string(8000))
             branches += obj("kind" to enum("ask_user"), "message" to string(2000))
+            branches += obj("kind" to enum("manual_takeover"), "message" to string(2000),
+                "reason" to any(listOf(enum(*SplitAgentProtocol.takeoverReasons.toTypedArray()), JSONObject().put("type", "null"))))
+            branches += obj("kind" to enum("login_verification"), "phase" to enum("begin", "passed", "failed"),
+                "package_name" to string(255), "reason" to string(700))
             branches += obj("kind" to enum("list_apps"), "query" to string(120, true))
             branches += obj("kind" to enum("read_notifications"), "package_name" to string(255, true))
             branches += obj("kind" to enum("read_clipboard"))
             branches += obj("kind" to enum("read_calendar"), "start_date" to string(10, true), "days" to integer(1, 31))
             branches += obj("kind" to enum("search_web"), "query" to string(300))
-            branches += obj("kind" to enum("read_web"), "url" to string(2000))
-            branches += obj("kind" to enum("load_skill"), "name" to string(120))
-            branches += obj("kind" to enum("read_skill_resource"), "name" to string(120), "path" to string(500))
+            branches += obj("kind" to enum("read_web"), "url" to string(2000),
+                "operation" to enum("info", "search", "read", "screenshot"), "query" to string(100, true),
+                "offset" to integer(0, Int.MAX_VALUE), "limit" to integer(1, 10000))
+            branches += obj("kind" to enum("read_attachment"), "attachment_id" to string(36),
+                "operation" to enum("info", "search", "read"), "query" to string(100, true),
+                "offset" to integer(0, Int.MAX_VALUE), "limit" to integer(1, ChatAttachmentContext.MAX_PAGE))
             val state = obj("phase" to string(500, true), "facts" to array(string(700)), "completed_steps" to array(string(700)),
                 "remaining_steps" to array(string(700)), "failed_routes" to array(string(700)),
                 "progress" to any(listOf(obj("plan" to array(string(60), 0, 5), "completed" to integer(0, 5),
@@ -72,13 +80,23 @@ internal object SplitOutputSchema {
             branches += obj("status" to enum("not_found", "ambiguous", "unsupported", "intent_mismatch"), "reason" to string(500))
             obj("result" to any(branches))
         }
-        val name = if (role == "primary") "doppel_a_${if (direct) "direct" else "ab"}_v3" else "doppel_b_${expectedAction ?: "all"}_v1"
+        val name = if (role == "primary") "doppel_a_${if (direct) "direct" else "ab"}_v11" else "doppel_b_${expectedAction ?: "all"}_v1"
         return JSONObject().put("type", "json_schema").put("json_schema", JSONObject().put("name", name).put("strict", true).put("schema", schema))
+    }
+
+    /** Identical field contracts share one kind enum; dispatch and authorization still use the exact kind. */
+    private fun plannerBranches(direct: Boolean): List<JSONObject> = SplitAgentProtocol.plannerActions.map { action ->
+        action to plannerExecute(action, direct).apply { getJSONObject("properties").put("kind", enum()) }
+    }.groupBy { it.second.toString() }.values.map { group ->
+        group.first().second.apply {
+            getJSONObject("properties").put("kind", enum(*group.map { it.first }.toTypedArray()))
+        }
     }
 
     private fun plannerExecute(action: String, direct: Boolean): JSONObject {
         val fields = linkedMapOf("kind" to enum(action), "target" to string(2000),
             "expected" to string(1500), "screen_context" to string(1200, true))
+        if (action == "tap") fields["request_login_code"] = any(listOf(JSONObject().put("type", "boolean"), JSONObject().put("type", "null")))
         if (action in setOf("swipe", "swipe_sequence")) {
             fields["swipe_extent"] = enum("small", "large")
             fields["scroll_goal"] = enum("inspect", "boundary")
@@ -86,9 +104,10 @@ internal object SplitOutputSchema {
             if (action == "swipe") copyProperties(plannerDirection(), fields)
             else fields["gesture_contracts"] = array(plannerDirection(), 1, 8)
         }
-        if (direct) coordinateFields(action, fields) else if (action == "type") fields["text"] = string(8000)
-        if (action == "login_password") { fields["package_name"] = string(255); fields["credential_label"] = string(80) }
+        if (direct) coordinateFields(if(action=="pay") "tap" else action, fields) else if (action == "type") fields["text"] = string(8000)
+        if (action in setOf("login_username", "login_password")) { fields["package_name"] = string(255); fields["credential_label"] = string(80) }
         if (action in setOf("login_phone", "login_code")) fields["package_name"] = string(255)
+        if (action == "login_code") fields["code_candidate_id"] = any(listOf(string(128), JSONObject().put("type", "null")))
         if (action == "launch") fields["package_name"] = string(255)
         nativeFields(action, fields)
         return obj(fields)
@@ -116,8 +135,11 @@ internal object SplitOutputSchema {
                 fields["interval_ms"] = integer(0, 1000)
             }
             "type" -> fields["text"] = string(8000)
-            "login_password" -> { fields["package_name"] = string(255); fields["credential_label"] = string(80) }
-            "login_phone", "login_code" -> fields["package_name"] = string(255)
+            "login_username", "login_password" -> { fields["package_name"] = string(255); fields["credential_label"] = string(80) }
+            "login_phone", "login_code" -> {
+                fields["package_name"] = string(255)
+                if (action == "login_code") fields["code_candidate_id"] = any(listOf(string(128), JSONObject().put("type", "null")))
+            }
             "launch" -> fields["package_name"] = string(255)
         }
     }
@@ -175,9 +197,9 @@ internal object SplitOutputSchema {
             if (role == "primary") {
                 // Wire v2/v3 share one discriminator. Convert the validated command to the engine's internal shape.
                 val kind = opt("kind") as? String ?: throw IllegalArgumentException("结构化输出缺少 kind")
-                require(kind in actions || kind in SplitAgentProtocol.readActions || kind in setOf("wait", "finish", "ask_user", "list_apps", "search_web", "read_web", "load_skill", "read_skill_resource")) { "结构化输出 kind 无效" }
+                require(kind in SplitAgentProtocol.plannerActions || kind in SplitAgentProtocol.readActions || kind in setOf("wait", "finish", "ask_user", "manual_takeover", "login_verification", "list_apps", "search_web", "read_web", "read_attachment")) { "结构化输出 kind 无效" }
                 require(!has("action")) { "A 线协议只使用 kind，不包含 action" }
-                if (kind in actions) put("kind", "execute").put("action", kind)
+                if (kind in SplitAgentProtocol.plannerActions) put("kind", "execute").put("action", kind)
                 // Empty optional context is an omission, not a blank field for the legacy semantic parser.
                 if (opt("screen_context") is String && optString("screen_context").isBlank()) remove("screen_context")
                 require(value.has("state") && (value.isNull("state") || value.opt("state") is JSONObject)) { "结构化输出 state 类型无效" }

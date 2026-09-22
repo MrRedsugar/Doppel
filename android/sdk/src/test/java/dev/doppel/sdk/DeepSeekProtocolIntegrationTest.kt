@@ -32,7 +32,7 @@ class DeepSeekProtocolIntegrationTest {
     }
 
     @Test fun thinkingAutoParsesActionContractAndDoesNotExposeReasoningAsTaskState() {
-        val value = JSONObject("""{"decision":{"kind":"tap","target":"visible unit card","expected":"selected card","screen_context":"paused battle"},"state":null}""")
+        val value = JSONObject("""{"decision":{"kind":"tap","target":"visible unit card","expected":"selected card","screen_context":"paused battle","request_login_code":null},"state":null}""")
         val raw = response(value)
         raw.getJSONArray("choices").getJSONObject(0).getJSONObject("message")
             .put("reasoning_content", "synthetic private reasoning")

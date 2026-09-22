@@ -163,7 +163,7 @@ class NativeDeviceCapabilitiesTest {
                 val panel = capture(service)
                 assertEquals("com.android.systemui", panel.getJSONObject("observation").getString("package_name"))
                 assertEquals("com.android.systemui", panel.getJSONObject("data").getJSONObject("visual_frame").getString("package_name"))
-                assertEquals("accessibility_window", panel.getJSONObject("data").getString("capture_backend"))
+                assertEquals("accessibility_windows", panel.getJSONObject("data").getString("capture_backend"))
                 File(folder, "$kind.png").writeBytes(android.util.Base64.decode(panel.getJSONObject("data").getString("image_base64"), android.util.Base64.NO_WRAP))
                 report.put("${kind}_opened", true)
                     .put("${kind}_window_capture_verified", true)

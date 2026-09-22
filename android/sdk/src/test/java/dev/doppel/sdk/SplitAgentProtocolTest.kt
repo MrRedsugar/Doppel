@@ -3,6 +3,39 @@ import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 class SplitAgentProtocolTest {
+    @Test fun objectDragHoldFlowsFromPlannerToGrounderAndExecutorWithoutBChoosingIt() {
+        val planner = swipeIntent("swipe").put("gesture_semantics", "object_drag")
+            .put("target_relative_direction", "right").put("start_hold_ms", 850)
+        val request = SplitAgentProtocol.grounder("pixels", planner)
+        val instruction = JSONObject(request.getJSONArray("messages").getJSONObject(1)
+            .getJSONArray("content").getJSONObject(0).getString("text"))
+        assertEquals(850, instruction.getInt("start_hold_ms"))
+        assertFalse(request.getJSONObject("response_format").toString().contains("start_hold_ms"))
+        val b = JSONObject("""{"status":"located","action":"swipe","points":[[100,500],[800,500]],"duration_ms":700,"assessment":{"alignment":"consistent","target_relative_direction":"right","required_finger_direction":"right","direction_corrected":false}}""")
+        val action = SplitAgentProtocol.reviewedGrounding(b, "swipe", planner)
+        assertEquals(850, action.getJSONArray("strokes").getJSONObject(0).getInt("start_hold_ms"))
+        assertEquals(850L, GestureSequencePlan.from(action, 1080, 1920).strokes.single().startHoldMs)
+        assertEquals(700L, GestureSequencePlan.from(action, 1080, 1920).strokes.single().durationMs)
+        assertThrows(IllegalArgumentException::class.java) {
+            SplitOutputSchema.validate(JSONObject().put("result", b.put("start_hold_ms", 100)), request.getJSONObject("response_format"))
+        }
+    }
+
+    @Test fun directPlannerSingleAndSequenceHoldMatchesEachGestureContract() {
+        val direct = swipeIntent("swipe").put("status", "located").put("gesture_semantics", "object_drag")
+            .put("target_relative_direction", "right").put("start_hold_ms", 750)
+            .put("points", org.json.JSONArray("[[100,500],[700,500]]")).put("duration_ms", 600)
+        assertEquals(750L, GestureSequencePlan.from(direct, 1080, 1920).strokes.single().startHoldMs)
+        val sequence = JSONObject("""{"status":"located","action":"swipe_sequence","gesture_contracts":[{"gesture_semantics":"object_drag","target_relative_direction":"right","intended_finger_direction":"right","start_hold_ms":750},{"gesture_semantics":"physical_gesture","target_relative_direction":"right","intended_finger_direction":"right","start_hold_ms":0}],"strokes":[{"points":[[100,500],[700,500]],"duration_ms":600},{"points":[[700,500],[800,500]],"duration_ms":250}]}""")
+        assertEquals(listOf(750L, 0L), GestureSequencePlan.from(sequence, 1080, 1920).strokes.map { it.startHoldMs })
+        assertThrows(IllegalArgumentException::class.java) {
+            SplitAgentProtocol.grounding(JSONObject(direct.toString()).put("gesture_semantics", "physical_gesture"), "swipe")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            SplitAgentProtocol.grounding(JSONObject(sequence.toString()).put("gesture_contracts", org.json.JSONArray()), "swipe_sequence")
+        }
+    }
+
     @Test fun explicitSwipeExtentReachesGrounderForSingleAndContinuousSwipes() {
         for (action in listOf("swipe", "swipe_sequence")) {
             for (extent in listOf("small", "large")) {
@@ -109,6 +142,26 @@ class SplitAgentProtocolTest {
         assertEquals("right",supplied.getString("intended_finger_direction"))
     }
 
+    @Test fun knownTapReceivesFreshTargetChecksWithoutUnrelatedSwipeInstructions() {
+        val intent = JSONObject().put("action", "tap").put("target", "保存按钮").put("expected", "保存完成")
+        val prompt = SplitAgentProtocol.grounder("pixels", intent).getJSONArray("messages").getJSONObject(0).getString("content")
+        assertTrue(prompt.contains("0..1000"))
+        assertTrue(prompt.contains("不沿用旧页面位置"))
+        assertTrue(prompt.contains("目标被弹窗遮挡"))
+        assertTrue(prompt.contains("intent_mismatch"))
+        assertFalse(prompt.contains("gesture_semantics"))
+        assertFalse(prompt.contains("swipe_extent"))
+        assertFalse(prompt.contains("double_tap"))
+        assertTrue(prompt.length < 900)
+        val doubleTap = SplitAgentProtocol.grounder("pixels", JSONObject(intent.toString()).put("action", "double_tap"))
+            .getJSONArray("messages").getJSONObject(0).getString("content")
+        assertTrue(doubleTap.contains("两个点表示依次点击两处"))
+        val typing = SplitAgentProtocol.grounder("pixels", JSONObject(intent.toString()).put("action", "type").put("text", "内容"))
+            .getJSONArray("messages").getJSONObject(0).getString("content")
+        assertTrue(typing.contains("原样返回 A 的 text"))
+        assertFalse(typing.contains("0..1000"))
+    }
+
     @Test fun doubleTapSupportsOneOrTwoLocations() {
         val same=SplitAgentProtocol.grounding(JSONObject("""{"status":"located","action":"double_tap","points":[[500,600]],"interval_ms":120}"""),"double_tap")
         assertEquals(1,same.getJSONArray("points").length())
@@ -162,7 +215,7 @@ class SplitAgentProtocolTest {
 
     @Test fun objectDragThenFacingRetainsCoordinatesAndRecordsOnlyTheEndpointRefinement() {
         val planner = JSONObject("""{"action":"swipe_sequence","target":"从右下方卡片拖到中央偏左的槽位，再从落点向右选择朝向","expected":"卡片放入槽位并朝向右侧",
-            "gesture_contracts":[{"gesture_semantics":"object_drag","target_relative_direction":"unknown","intended_finger_direction":"up"},
+            "gesture_contracts":[{"gesture_semantics":"object_drag","target_relative_direction":"unknown","intended_finger_direction":"up","start_hold_ms":800},
                 {"gesture_semantics":"physical_gesture","target_relative_direction":"unknown","intended_finger_direction":"right"}]}""")
         val raw = """{"result":{"status":"located","action":"swipe_sequence","strokes":[
             {"points":[[850,850],[400,350]],"duration_ms":900},{"points":[[400,350],[600,350]],"duration_ms":400}],"interval_ms":100,
@@ -173,7 +226,10 @@ class SplitAgentProtocolTest {
         val original = parsed.toString()
         val result = SplitAgentProtocol.reviewedGrounding(parsed, "swipe_sequence", planner, 1920, 1080)
         assertEquals("located", result.getString("status"))
-        assertEquals(parsed.getJSONArray("strokes").toString(), result.getJSONArray("strokes").toString())
+        for (index in 0..1) assertEquals(parsed.getJSONArray("strokes").getJSONObject(index).getJSONArray("points").toString(),
+            result.getJSONArray("strokes").getJSONObject(index).getJSONArray("points").toString())
+        assertEquals(800, result.getJSONArray("strokes").getJSONObject(0).getInt("start_hold_ms"))
+        assertEquals(0, result.getJSONArray("strokes").getJSONObject(1).getInt("start_hold_ms"))
         assertFalse(result.has("swipe_extent"))
         val contract = result.getJSONObject("direction_contract")
         assertTrue(contract.getBoolean("direction_corrected"))
@@ -203,14 +259,14 @@ class SplitAgentProtocolTest {
         assertTrue(request.getJSONArray("messages").getJSONObject(0).getString("content").contains("result"))
     }
 
-    @Test fun primaryRequestHintUsesSingleV3DiscriminatorInBothModes() {
+    @Test fun primaryRequestHintUsesSingleV6DiscriminatorInBothModes() {
         for(direct in listOf(false,true)) {
             val request=SplitAgentProtocol.request("primary",org.json.JSONArray(),direct=direct)
             val hint=request.getJSONArray("messages").getJSONObject(0).getString("content")
             assertTrue(hint.contains("decision.kind 直接选择 tap/swipe"))
             assertTrue(hint.contains("不输出 action 字段，不使用 execute"))
             assertFalse(hint.contains("kind、action"))
-            assertTrue(request.getJSONObject("response_format").getJSONObject("json_schema").getString("name").endsWith("_v3"))
+            assertTrue(request.getJSONObject("response_format").getJSONObject("json_schema").getString("name").endsWith("_v11"))
         }
     }
 

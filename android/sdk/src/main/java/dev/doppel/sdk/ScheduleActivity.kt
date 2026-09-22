@@ -72,9 +72,9 @@ class ScheduleActivity : Activity() {
         val revision = ++viewRevision
         content.removeAllViews()
         space(content, UiTheme.text(this, "让事情按时发生", 26f, UiTheme.ink, true))
-        space(content, UiTheme.text(this, "安排一次、每天，或按自己的节奏重复。已有任务优先，错过的任务不会密集补做。", 14f, UiTheme.muted), 22)
+        space(content, UiTheme.text(this, "安排一次、每天，或按自己的节奏重复。到时间后加入任务队列，按顺序执行；已经排队的任务不会因等待超时而丢失。", 14f, UiTheme.muted), 22)
         space(content, AutomaticTaskConflict.notificationSettingsView(this))
-        space(content, UiTheme.text(this, "请保留系统锁屏密码。正在使用手机时会提前 15 秒提醒，可执行、推迟或跳过。锁屏时默认等待你解锁，也可单独开启本机自动解锁。自动解锁后执行完会重新锁屏；期间长按接管或停止 3 秒，再输入系统密码。超过 5 分钟未就绪会跳过并记录原因。", 13f, UiTheme.muted))
+        space(content, UiTheme.text(this, "请保留系统锁屏密码。轮到自动任务时，会提前 15 秒提醒，可执行或跳过。锁屏时默认等待你解锁，也可单独开启本机自动解锁。自动解锁后执行完会重新锁屏；期间长按接管或停止 3 秒，再验证密码。另可开启同一局域网免密码接管，默认关闭。未能及时入队的过期计划会跳过并记录原因。", 13f, UiTheme.muted))
         space(content, UiTheme.command(this, "自动解锁设置") { startActivity(android.content.Intent(this, AutomaticUnlockSettingsActivity::class.java)) })
         space(content, UiTheme.command(this, "打开系统显示设置") { startActivity(android.content.Intent(android.provider.Settings.ACTION_DISPLAY_SETTINGS)) })
         status = UiTheme.text(this, "正在读取计划…", 13f, UiTheme.muted)
@@ -84,8 +84,7 @@ class ScheduleActivity : Activity() {
         actions.addView(UiTheme.command(this, "开启执行会话") {
             try {
                 check(FirstUseConsent.isAccepted(this)) { "请先完成使用同意" }
-                check(gateway.prefs.getString("active_run", "").isNullOrBlank()) { "请先结束已有任务；定时任务不会抢占它" }
-                check(TaskControl.startWorker(this)) { "会话已被其他操作暂停" }
+                check(TaskControl.wakeQueue(this)) { "会话已被其他操作暂停" }
                 status.text = "执行会话已开启；锁屏时按自动解锁设置处理，未开启时等待你手动解锁"
             } catch (error: Exception) { status.text = error.message ?: "暂时无法开启执行会话" }
         }, LinearLayout.LayoutParams(0, -2, 1f))
@@ -134,7 +133,7 @@ class ScheduleActivity : Activity() {
         }
         if (history != null && history.length() > 0) {
             val last = history.getJSONObject(history.length() - 1)
-            val label = when (last.optString("status")) { "started" -> "已创建任务"; "completed" -> "已完成"; "cancelled" -> "已取消"; "missed" -> "错过，已跳过"; "uncertain" -> "结果待核对"; "failed" -> "执行失败"; "skipped" -> "已跳过"; "unavailable" -> "任务记录不可用"; else -> "记录待更新" }
+            val label = when (last.optString("status")) { "queued" -> "已加入队列"; "started" -> "正在执行"; "paused" -> "已暂停"; "awaiting_input" -> "等待补充"; "awaiting_approval" -> "等待确认"; "completed" -> "已完成"; "cancelled" -> "已取消"; "missed" -> "错过，已跳过"; "uncertain" -> "结果待核对"; "failed" -> "执行失败"; "skipped" -> "已跳过"; "unavailable" -> "任务记录不可用"; else -> "记录待更新" }
             space(card, UiTheme.text(this, "最近一次 · $label\n${time(last.optLong("at_ms"), zone)}", 12f, UiTheme.muted))
             last.optString("reason").takeIf { it.isNotBlank() }?.let { space(card, UiTheme.text(this, reason(it), 12f, UiTheme.muted)) }
             last.optString("run_id").takeIf { it.isNotBlank() && it != "null" }?.let { runId ->
@@ -261,6 +260,7 @@ class ScheduleActivity : Activity() {
         "connection_changed" -> "连接已改变，请检查计划绑定的设备"
         "unsupported_direct_scope" -> "本机直连不支持该计划的应用范围或目标长度，请编辑计划或改用网关"
         "review_uncertain_dispatch" -> "上次创建结果不明确，已停用以避免重复执行"
+        "queue_submission_retry" -> "入队尚未确认，将核对原请求后重试，不会重复创建"
         else -> "等待设备就绪"
     }
 }

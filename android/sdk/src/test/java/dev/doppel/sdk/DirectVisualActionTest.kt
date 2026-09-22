@@ -158,10 +158,10 @@ class DirectVisualActionTest {
             assertTrue(engine.poll().isNull("command"))
         }
     }
-    @Test fun paymentAndVerificationRemainManualEvenWhenFullOrModelDeclaresSafe() {
+    @Test fun declaredPaymentAndVerificationRemainManualInLegacyVisualProtocol() {
         for (label in listOf("收银台", "安全验证")) {
             val engine = engine(); val id = create(engine, label = label)
-            engine.accept(grounding(engine, label), reply("propose_tap", candidate()))
+            engine.accept(grounding(engine, label), reply("propose_tap", candidate().put("safety", if (label == "收银台") "payment" else "verification")))
             assertEquals("paused", engine.get(id).getString("status")); assertTrue(engine.poll().isNull("command"))
             assertTrue(engine.get(id).getJSONObject("pending_request").getBoolean("manual_only"))
         }

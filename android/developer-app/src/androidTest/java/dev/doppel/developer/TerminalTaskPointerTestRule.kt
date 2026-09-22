@@ -1,8 +1,9 @@
+@file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+
 package dev.doppel.developer
 
 import androidx.test.platform.app.InstrumentationRegistry
 import dev.doppel.sdk.DeviceWorkerService
-import org.json.JSONArray
 import org.junit.rules.TestRule
 import org.junit.runner.Description
 import org.junit.runners.model.Statement
@@ -19,7 +20,7 @@ internal class TerminalTaskPointerTestRule : TestRule {
             check(DeviceWorkerService.instance == null) { "Retain any existing worker" }
             val file = File(context.noBackupFilesDir, "direct-runs-v1.json")
             val before = file.readBytes()
-            val rows = JSONArray(String(before, Charsets.UTF_8))
+            val rows = dev.doppel.sdk.SplitTaskEngine.readPersistedRuns(String(before, Charsets.UTF_8))
             val terminal = setOf("completed", "failed", "cancelled")
             check((0 until rows.length()).all { rows.getJSONObject(it).optString("status") in terminal }) {
                 "Retain every unfinished task"

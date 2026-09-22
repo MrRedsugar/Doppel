@@ -157,7 +157,7 @@ class SwipeExtentPolicyTest {
         assertFalse(engine.get("old-medium-run").has("recent_steps"))
         assertTrue(engine.poll().isNull("command"))
         engine.create(JSONObject().put("goal","新的独立任务").put("device_id","direct-this-phone").put("mode","full"))
-        val values=JSONArray(persisted)
+        val values=SplitTaskEngine.readPersistedRuns(persisted)
         val restored=(0 until values.length()).map(values::getJSONObject).single {it.getString("id")=="old-medium-run"}
         assertEquals("medium",restored.getJSONArray("recent_steps").getJSONObject(0).getJSONObject("receipt")
             .getJSONObject("executed_action").getString("swipe_extent"))

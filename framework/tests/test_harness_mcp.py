@@ -93,6 +93,17 @@ async def call_stdio_tool(env, tmp_path, name="observe", arguments=None):
             return await session.call_tool(name, arguments or {})
 
 
+@pytest.mark.asyncio
+async def test_payment_mcp_reuses_act_without_exposing_host_authority(tmp_path):
+    arguments = {"action": "pay", "target": "button", "screen_id": "checkout"}
+    with gateway_fixture() as (gateway, state):
+        result = await call_stdio_tool(bridge_environment(gateway), tmp_path, "act", arguments)
+    assert not result.is_error
+    forwarded = state["tool_requests"][0]["body"]["arguments"]
+    assert all(forwarded[key] == value for key, value in arguments.items())
+    assert not {"mode", "payment_consent_id", "safety"}.intersection(forwarded)
+
+
 @pytest.mark.parametrize("model", ["deepseek-v4-pro", "mimo-v2.5-pro"])
 def test_worker_preserves_task_authorization_through_official_mcp_child(tmp_path, model):
     """Removing the explicit MCP task-token environment must break broker access."""
@@ -190,6 +201,7 @@ async def test_finish_task_forwards_outcome_and_host_evidence_over_stdio(tmp_pat
                 await session.initialize()
                 catalog = await session.list_tools()
                 assert "finish_task" in [tool.name for tool in catalog.tools]
+                assert not {"list_skills", "read_skill", "load_skill", "read_skill_resource"}.intersection(tool.name for tool in catalog.tools)
                 result = await session.call_tool("finish_task", arguments)
     assert not result.is_error
     assert state["tool_requests"] == [{

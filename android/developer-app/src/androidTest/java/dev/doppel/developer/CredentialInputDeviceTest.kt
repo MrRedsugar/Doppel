@@ -29,7 +29,7 @@ import java.security.KeyStore
 import java.security.MessageDigest
 import java.util.UUID
 
-/** Real native password field + Android Keystore, driven by a separate real task engine with no model calls. */
+/** Real native login fields + Android Keystore, driven by a separate real task engine with no model calls. */
 class CredentialInputDeviceTest {
     private val inst = InstrumentationRegistry.getInstrumentation()
     private val context get() = inst.targetContext
@@ -77,9 +77,10 @@ class CredentialInputDeviceTest {
             context.startActivity(Intent().setClassName(targetPackage, "$targetPackage.MainActivity").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
             click("密码填写验证")
             expect("登录密码")
-            fun fill(pkg: String = targetPackage): Boolean {
-                val node = find { it.isEditable && it.contentDescription?.toString() == "测试密码输入框" }
-                return try { reader.fillForTask(pkg, "Fixture login", node, ::active) } finally { node.recycle() }
+            fun fill(pkg: String = targetPackage, field: String = "password", accountTarget: Boolean = field == "username"): Boolean {
+                val description = if (accountTarget) "测试账号输入框" else "测试密码输入框"
+                val node = find { it.isEditable && it.contentDescription?.toString() == description }
+                return try { reader.fillForTask(pkg, "Fixture login", node, field, ::active) } finally { node.recycle() }
             }
             assertFalse("Unconsented saved entries must never fill", fill())
             checks.put("old_entry_unconsented", true)
@@ -87,6 +88,8 @@ class CredentialInputDeviceTest {
             val hints = reader.taskLabels(targetPackage)
             assertEquals(1, hints.length())
             assertEquals(targetPackage, hints.getJSONObject(0).getString("package_name"))
+            assertTrue(hints.getJSONObject(0).getBoolean("has_username"))
+            assertTrue(hints.getJSONObject(0).getBoolean("has_password"))
             assertFalse("Only app and label metadata can reach the planner", hints.toString().contains("fixture-user") || hints.toString().contains("fixture-only-password"))
             assertFalse("An exact package mismatch must fail", fill("com.android.settings"))
             assertTrue("Granted native input must work even while management remains PIN-locked", fill())
@@ -107,6 +110,39 @@ class CredentialInputDeviceTest {
                 .put("echoed_text_description_hint_and_state_redacted", true)
 
             clearField()
+            assertFalse("An account must never be written into a password field", fill(field = "username", accountTarget = false))
+            fun accountFocus(focused: Boolean) {
+                // A distinct focus target prevents Android from refocusing its only text field.
+                val node = if (focused) find { it.isEditable && it.contentDescription?.toString() == "测试账号输入框" }
+                    else find { !it.isEditable && it.text?.toString() == "回显已清除" }
+                try {
+                    node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id)
+                    if (!node.isFocused) node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                } finally { node.recycle() }
+                inst.waitForIdleSync()
+                find { it.isEditable && it.contentDescription?.toString() == "测试账号输入框" && it.isFocused == focused }.recycle()
+            }
+            accountFocus(true)
+            assertFalse("Account fill still requires the exact saved app", fill("com.android.settings", "username"))
+            assertFalse("Unknown credential fields must not default to a password", fill(field = "unknown"))
+            assertTrue("A focused plain-text field receives the local account", fill(field = "username"))
+            find { it.isEditable && it.text?.toString() == "fixture-user" }.recycle()
+            assertFalse("Reading account metadata must leave management locked", reader.isUnlocked())
+            verifyPrivateCapture("username", folder, "测试账号输入框")
+            accountFocus(false)
+            assertFalse("An unfocused plain-text field cannot receive an account", fill(field = "username"))
+            accountFocus(true)
+            assertTrue(admin.unlock("7352")); admin.save(entry.copy(username = "", allowTasks = true)); admin.lock()
+            assertFalse(reader.taskLabels(targetPackage).getJSONObject(0).getBoolean("has_username"))
+            assertFalse("A missing account must not clear the target", fill(field = "username"))
+            find { it.isEditable && it.text?.toString() == "fixture-user" }.recycle()
+            assertTrue(admin.unlock("7352")); admin.save(entry.copy(allowTasks = false)); admin.lock()
+            assertFalse("Disabling consent also disables account fill", fill(field = "username"))
+            assertTrue(admin.unlock("7352")); admin.save(entry.copy(allowTasks = true)); admin.lock()
+            clearField("测试账号输入框"); clearField()
+            checks.put("account_local_native_input_confirmed", true).put("account_plain_focused_field_required", true)
+                .put("account_metadata_and_capture_redacted", true).put("account_missing_and_unconsented_rejected", true)
+
             assertTrue(admin.unlock("7352"))
             admin.save(entry.copy(id = "", allowTasks = true))
             val duplicate = admin.entries().single { it.id != entry.id }
@@ -130,7 +166,7 @@ class CredentialInputDeviceTest {
             checks.put("financial_password_rejected", true)
             passed = true
         } finally {
-            runCatching { clearField(); click("返回场景") }
+            runCatching { clearField("测试账号输入框"); clearField(); click("返回场景") }
             inst.sendKeyDownUpSync(KeyEvent.KEYCODE_HOME)
             names.forEach { context.deleteSharedPreferences(it) }
             aliases.forEach { if (store.containsAlias(it)) store.deleteEntry(it) }
@@ -171,8 +207,8 @@ class CredentialInputDeviceTest {
         error("Fixture control is not clickable")
     }
     private fun expect(label: String) { find { it.text?.toString() == label && it.isVisibleToUser }.recycle() }
-    private fun clearField() {
-        val node = find { it.isEditable && it.contentDescription?.toString() == "测试密码输入框" }
+    private fun clearField(description: String = "测试密码输入框") {
+        val node = find { it.isEditable && it.contentDescription?.toString() == description }
         try { assertTrue(node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "")
         })) } finally { node.recycle() }
@@ -183,14 +219,14 @@ class CredentialInputDeviceTest {
         File(folder, "credential-native-filled.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
         bitmap.recycle()
     }
-    private fun verifyPrivateCapture(name: String, folder: File) {
+    private fun verifyPrivateCapture(name: String, folder: File, description: String = "测试密码输入框") {
         val service = requireNotNull(DoppelAccessibilityService.instance) { "The real host accessibility service must remain enabled" }
-        val field = find { it.isEditable && it.contentDescription?.toString() == "测试密码输入框" }
+        val field = find { it.isEditable && it.contentDescription?.toString() == description }
         try { field.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id) } finally { field.recycle() }
         inst.waitForIdleSync(); SystemClock.sleep(500)
         val observation = service.observe()
         assertEquals(targetPackage, observation.getString("package_name"))
-        assertFalse("No observed field may export a filled password", observation.toString().contains("fixture-only-password-two"))
+        assertFalse("No observed field may export a filled account or password", observation.toString().contains("fixture-only-password-two") || observation.toString().contains("fixture-user"))
         val shot = service.execute(JSONObject().put("id", "credential-privacy-${UUID.randomUUID()}")
             .put("run_id", "credential-privacy-fixture").put("kind", "screenshot").put("split_agent", true).put("mode", "full"))
         assertEquals("Normal password login must retain its screenshot loop: ${shot.optString("message")}", "ok", shot.optString("status"))
@@ -199,7 +235,7 @@ class CredentialInputDeviceTest {
         val bytes = android.util.Base64.decode(data.getString("image_base64"), android.util.Base64.NO_WRAP)
         val bitmap = requireNotNull(BitmapFactory.decodeByteArray(bytes, 0, bytes.size))
         try {
-            val node = find { it.isEditable && it.contentDescription?.toString() == "测试密码输入框" }
+            val node = find { it.isEditable && it.contentDescription?.toString() == description }
             val bounds = Rect()
             try { node.getBoundsInScreen(bounds) } finally { node.recycle() }
             val frame = data.getJSONObject("visual_frame")

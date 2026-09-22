@@ -3,17 +3,21 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.READ_CALENDAR" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <queries><intent><action android:name="android.speech.tts.engine.TTS_SERVICE" /></intent><intent><action android:name="android.speech.RecognitionService" /></intent><intent><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent></queries>
+    <queries><intent><action android:name="android.content.pm.action.REQUEST_PERMISSIONS" /></intent><intent><action android:name="android.speech.tts.engine.TTS_SERVICE" /></intent><intent><action android:name="android.speech.RecognitionService" /></intent><intent><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent></queries>
     <application>
+        <service android:name=".ReaderService" android:exported="false" android:process=":reader" />
         <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.documents" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/document_paths" /></provider>
         <activity android:name=".VoiceActivity" android:exported="false" android:taskAffinity="${applicationId}.voice" android:excludeFromRecents="true" android:theme="@style/DoppelGlassDialog" />
         <activity android:name=".TaskPanelActivity" android:exported="false" android:taskAffinity="${applicationId}.companion" android:excludeFromRecents="true" android:theme="@style/DoppelGlassDialog" />
@@ -30,11 +34,14 @@
         <activity android:name=".OnboardingActivity" android:exported="false" />
         <activity android:name=".LegalActivity" android:exported="false" />
         <activity android:name=".ExtensionSettingsActivity" android:exported="false" />
+        <activity android:name=".LongTermMemoryActivity" android:exported="false" />
         <activity android:name=".AutoTriggerSettingsActivity" android:exported="false" />
         <activity android:name=".ControlPickerSnapshotActivity" android:exported="false" android:excludeFromRecents="true" />
         <activity android:name=".DeveloperConnectionActivity" android:exported="false" android:excludeFromRecents="true" />
         <activity android:name=".ModelSettingsActivity" android:exported="false" android:excludeFromRecents="true" />
+        <activity android:name=".CloudAccountActivity" android:exported="false" android:excludeFromRecents="true" />
         <activity android:name=".LoginSettingsActivity" android:exported="false" />
+        <activity android:name=".PcConnectionActivity" android:exported="false" android:excludeFromRecents="true" />
         <activity android:name=".PasswordSettingsActivity" android:exported="false" />
         <activity android:name=".PaymentSettingsActivity" android:exported="false" android:excludeFromRecents="true" />
         <service android:name=".LoginNotificationService" android:label="Doppel 通知与登录验证码" android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" android:exported="true">
@@ -52,6 +59,8 @@
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="User initiated visible assistive device command session with persistent pause control" />
         </service>
         <service android:name=".ScheduleJobService" android:exported="true" android:permission="android.permission.BIND_JOB_SERVICE" />
+        <service android:name=".SdkCompanionService" android:exported="false" android:foregroundServiceType="connectedDevice" />
+        <service android:name=".cloud.CloudConnectionService" android:exported="false" android:foregroundServiceType="connectedDevice" />
         <!-- Voice/companion sheets remove their own tasks; sharing has an explicit notification stop control. -->
         <service android:name=".LegacyScreenCaptureService" android:exported="false" android:foregroundServiceType="mediaProjection" />
         <receiver android:name=".ScheduleBootReceiver" android:exported="false">

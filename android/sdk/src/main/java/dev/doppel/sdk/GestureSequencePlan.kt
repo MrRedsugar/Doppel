@@ -4,9 +4,11 @@ import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.random.Random
 
-internal data class PlannedStroke(val points:List<FeedbackPoint>,val durationMs:Long)
+internal data class PlannedStroke(val points:List<FeedbackPoint>,val durationMs:Long,val startHoldMs:Long=0) {
+    val totalMs:Long get()=startHoldMs+durationMs
+}
 internal data class GestureSequencePlan(val kind:String,val strokes:List<PlannedStroke>,val intervalMs:Long) {
-    val totalMs:Long get()=strokes.sumOf {it.durationMs}+intervalMs*(strokes.size-1).coerceAtLeast(0)
+    val totalMs:Long get()=strokes.sumOf {it.totalMs}+intervalMs*(strokes.size-1).coerceAtLeast(0)
     companion object {
         fun from(input:JSONObject,width:Int,height:Int,random:Random=Random.Default):GestureSequencePlan {
             require(width>0 && height>0)
@@ -30,7 +32,7 @@ internal data class GestureSequencePlan(val kind:String,val strokes:List<Planned
                 }
                 "swipe","swipe_sequence" -> {
                     val list=a.getJSONArray("strokes")
-                    (0 until list.length()).map {i -> val s=list.getJSONObject(i);PlannedStroke(mapped(s.getJSONArray("points")),s.getLong("duration_ms"))}
+                    (0 until list.length()).map {i -> val s=list.getJSONObject(i);PlannedStroke(mapped(s.getJSONArray("points")),s.getLong("duration_ms"),s.optLong("start_hold_ms",0))}
                 }
                 else -> emptyList()
             }

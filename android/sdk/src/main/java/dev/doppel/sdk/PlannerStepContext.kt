@@ -7,9 +7,13 @@ import org.json.JSONObject
 internal object PlannerStepContext {
     private const val RECENT_STEP_LIMIT = 6
 
-    fun steps(values: JSONArray): JSONArray = JSONArray().apply {
+    fun steps(values: JSONArray, latestIntent: JSONObject? = null, latestReceipt: JSONObject? = null): JSONArray = JSONArray().apply {
         for (index in (values.length() - RECENT_STEP_LIMIT).coerceAtLeast(0) until values.length()) {
             val original = values.optJSONObject(index) ?: continue
+            // The planner receives the current intent/receipt separately, including newer launch verification.
+            val id = original.optJSONObject("receipt")?.optString("command_id").orEmpty()
+            if (id.isNotBlank() && id == latestReceipt?.optString("command_id") &&
+                original.optJSONObject("intent")?.toString() == latestIntent?.toString()) continue
             val step = JSONObject(original.toString())
             original.optJSONObject("receipt")?.let { step.put("receipt", receipt(it)) }
             put(step)
@@ -18,7 +22,8 @@ internal object PlannerStepContext {
 
     fun receipt(value: JSONObject): JSONObject = JSONObject(value.toString()).apply {
         for (key in listOf("command_id", "sequence", "sequence_id", "source_capture_id", "grounding_capture_id",
-            "touch_handoff", "guard_handoff")) remove(key)
+            "touch_handoff", "guard_handoff", "visual_verification", "sequence_navigation",
+            "action_completed_at_elapsed_ms", "post_action_delay_ms")) remove(key)
         optJSONObject("executed_action")?.let { action ->
             // A already receives its semantic intent and the actual points / timing.
             // Keep B's effective/corrected direction, but omit duplicated A input

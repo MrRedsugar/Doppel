@@ -1,0 +1,5 @@
+Legacy Office fixtures copied unchanged from centic9/poi-on-android,
+commit a29c7a4cdd94175c2be43678c82afc818b60ff3f, poitest/src/main/res/raw.
+https://github.com/centic9/poi-on-android/tree/a29c7a4cdd94175c2be43678c82afc818b60ff3f
+Copyright 2015-2024 Dominik Stadler. Apache License, Version 2.0.
+See android/sdk/src/main/assets/third_party/Apache-2.0.txt.

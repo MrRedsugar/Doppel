@@ -67,7 +67,7 @@ class TaskPanelActivity : Activity() {
         if (intent.getStringExtra("pending_input").isNullOrBlank() && DeviceWorkerService.instance?.revealPauseControls(runId) == true) {
             closePanel(); return
         }
-        initialText = savedInstanceState?.getString("pending_input") ?: intent.getStringExtra("pending_input") ?: gateway.prefs.getString("companion_draft", "").orEmpty()
+        initialText = savedInstanceState?.getString("pending_input") ?: intent.getStringExtra("pending_input") ?: gateway.prefs.getString("companion_draft_$runId", "").orEmpty()
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; background = UiTheme.glass(this@TaskPanelActivity, 28); clipToOutline = true }
         UiTheme.window(this, root)
         val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(22), dp(12), dp(22), 0) }
@@ -205,8 +205,9 @@ class TaskPanelActivity : Activity() {
         val state = run.optString("status")
         title.text = TaskPresentation.withSourceLabel(run, TaskPresentation.title(state))
         goal.text = run.optString("goal")
-        val display = PauseDetails.resolve(this, run, DeviceWorkerService.instance?.isPaused != false)
-        val locallyStopped = state == "running" && DeviceWorkerService.instance?.isPaused != false
+        val ownerPaused = gateway.prefs.getString("active_run", "") == runId && DeviceWorkerService.instance?.isPaused != false
+        val display = PauseDetails.resolve(this, run, ownerPaused)
+        val locallyStopped = state == "running" && ownerPaused
         taskProgress.display(run, locallyStopped)
         val pauseInfo = PausePresentation.from(display) ?: if (locallyStopped) PausePresentation.from(JSONObject(display.toString()).put("status", "paused").put("message", "已暂停")) else null
         val pausedSurface = pauseInfo != null
@@ -223,29 +224,40 @@ class TaskPanelActivity : Activity() {
         progress.visibility = if (state == "running") View.VISIBLE else View.INVISIBLE
         val active = state !in setOf("completed", "failed", "cancelled")
         newTask.text = if (active) "说件新事" else "继续说"
-        if (!active && gateway.prefs.getString("active_run", "") == runId) gateway.prefs.edit().remove("active_run").remove("voice_pending_worker_run").remove("voice_pending_worker_generation").apply()
-        val localPaused = DeviceWorkerService.instance?.isPaused != false
+        val localPaused = gateway.prefs.getString("active_run", "") == runId && DeviceWorkerService.instance?.isPaused != false
         progress.active = state == "running" && !localPaused
         if (localPaused) progress.visibility = View.INVISIBLE
         if (pauseInfo != null) title.text = TaskPresentation.withSourceLabel(run, if (pauseInfo.userInitiated) "任务待续" else pauseInfo.category)
         pause.visibility = if (state == "running" && !localPaused) View.VISIBLE else View.GONE
         resume.visibility = if (state == "paused" || state == "running" && localPaused) View.VISIBLE else View.GONE
         stop.visibility = if (active) View.VISIBLE else View.GONE
+        stop.text = if (state == "queued") "取消排队" else "停止任务"
         for (button in listOf(pause, resume, stop, newTask)) button.isEnabled = !busy
-        val request = run.optJSONObject("pending_request")
-        val identity = state + ":" + request?.optString("id").orEmpty()
+        val request = display.optJSONObject("pending_request")
+        val identity = display.optString("status") + ":" + request?.toString().orEmpty()
         if (identity == requestId) return
         requestId = identity; pending.removeAllViews()
-        val editable = request?.optString("kind") == "input" && !request.optBoolean("manual_only") && state == "awaiting_input"
+        val editable = request?.optString("kind") == "input" && !request.optBoolean("manual_only") && display.optString("status") == "awaiting_input"
         input.visibility = if (editable || input.text.isNotBlank()) View.VISIBLE else View.GONE
         if (request != null) {
             val explanation = request.optString("message")
             if (explanation.isNotBlank() && !summary.text.toString().contains(explanation)) pending.addView(UiTheme.text(this, explanation, 14f).apply { setPadding(0, dp(12), 0, dp(8)) })
-            if (state == "awaiting_approval") {
+            if (pauseInfo?.showLoginSettings == true) pending.addView(UiTheme.command(this, "设置登录方式") {
+                if (busy || gateway.prefs.getString("active_run", "") != runId) return@command
+                val latest = current ?: return@command
+                val stopped = PauseDetails.resolve(this, latest, DeviceWorkerService.instance?.isPaused != false)
+                if (PausePresentation.from(stopped)?.showLoginSettings != true) return@command
+                saveInput()
+                val open = Intent(this, LoginSettingsActivity::class.java)
+                stopped.optJSONObject("pending_request")?.optString("package_name")
+                    ?.takeIf { it.isNotBlank() && it != packageName }?.let { open.putExtra("package_name", it) }
+                startActivity(open)
+            }, LinearLayout.LayoutParams(-1, dp(46)).apply { topMargin = dp(8) })
+            if (display.optString("status") == "awaiting_approval") {
                 for ((name, allow) in listOf("批准" to true, "拒绝" to false)) pending.addView(UiTheme.command(this, name, allow) {
                     control("answer", JSONObject().put("request_id", request.getString("id")).put("approve", allow))
                 }, LinearLayout.LayoutParams(-1, dp(46)).apply { topMargin = dp(8) })
-            } else if (state == "awaiting_input") {
+            } else if (display.optString("status") == "awaiting_input") {
                 val manual = request.optBoolean("manual_only")
                 pending.addView(UiTheme.command(this, if (manual) "已手动处理，继续" else "提交补充", true) {
                     val answer = if (manual) "用户确认已在手机上手动处理，请重新观察当前页面" else input.text.toString().trim()
@@ -263,7 +275,7 @@ class TaskPanelActivity : Activity() {
         NewTaskEntry.open(this, gateway, draft) {
             if (!visible || isFinishing || isDestroyed) return@open
             initialText = ""; input.setText("")
-            gateway.prefs.edit().remove("companion_draft").apply()
+            gateway.prefs.edit().remove("companion_draft_$runId").apply()
             startActivity(Intent(this, VoiceActivity::class.java).putExtra(VoiceActivity.EXTRA_OPEN_KEYBOARD, true)
                 .putExtra("initial_text", draft).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP))
             closePanel()
@@ -283,7 +295,7 @@ class TaskPanelActivity : Activity() {
             if (!visible) return@request
             controls.isEnabled = true; requestId = ""
             if (run != null) {
-                if (action == "answer") { input.setText(""); gateway.prefs.edit().remove("companion_draft").apply() }
+                if (action == "answer") { input.setText(""); gateway.prefs.edit().remove("companion_draft_$runId").apply() }
                 if (action == "cancel" && TaskPresentation.terminal(run.optString("status"))) DeviceWorkerService.instance?.acceptEndedRun(run)
                 render(run)
                 if (action == "cancel" && TaskPresentation.terminal(run.optString("status"))) closePanel()
@@ -296,27 +308,26 @@ class TaskPanelActivity : Activity() {
 
     private fun startWorker() {
         if (!visible || isFinishing || isDestroyed || runId.isBlank()) return
-        gateway.prefs.edit().putString("active_run", runId).remove("voice_pending_worker_run").remove("voice_pending_worker_generation").apply()
         try { if (TaskControl.startWorker(this)) closePanel() }
         catch (_: Exception) { summary.text = "执行服务未启动，请重新检查权限" }
     }
 
-    private fun saveInput() { if (::input.isInitialized) gateway.prefs.edit().putString("companion_draft", input.text.toString()).apply() }
+    private fun saveInput() { if (::input.isInitialized) gateway.prefs.edit().putString("companion_draft_$runId", input.text.toString()).apply() }
     private fun closePanel() { if (isTaskRoot) finishAndRemoveTask() else finish() }
     private fun dp(value: Int) = UiTheme.dp(this, value)
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent); setIntent(intent)
         if (!FirstUseConsent.allowEntry(this)) return
-        intent.getStringExtra("pending_input")?.let {
-            initialText = it; input.setText(it); saveInput()
-            if (it.isNotBlank()) input.visibility = View.VISIBLE
-        }
         val active = intent.getStringExtra("run_id") ?: gateway.prefs.getString("active_run", "").orEmpty().ifBlank {
             runCatching { JSONObject(gateway.prefs.getString("last_result", "{}").orEmpty()).optString("id") }.getOrDefault("")
         }
         if (intent.getStringExtra("pending_input").isNullOrBlank() && DeviceWorkerService.instance?.revealPauseControls(active) == true) { closePanel(); return }
         if (active != runId) {
-            runId = active; current = null; events = null; requestId = ""; pending.removeAllViews()
+            saveInput(); runId = active; input.setText(gateway.prefs.getString("companion_draft_$runId", "").orEmpty()); current = null; events = null; requestId = ""; pending.removeAllViews()
+        }
+        intent.getStringExtra("pending_input")?.let {
+            initialText = it; input.setText(it); saveInput()
+            if (it.isNotBlank()) input.visibility = View.VISIBLE
         }
         if (intent.getBooleanExtra(EXTRA_PAUSE_ON_OPEN, false) && runId.isNotBlank()) control("pause")
     }

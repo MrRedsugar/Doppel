@@ -35,7 +35,7 @@ class ScheduleTest {
     private class Port : SchedulePort {
         var busy: String? = null
         var calls = 0
-        var status: String? = "running"
+        var status: String? = "queued"
         val statusCalls = mutableListOf<String>()
         var statusFailure: Exception? = null
         var onStatus: () -> Unit = {}
@@ -84,7 +84,7 @@ class ScheduleTest {
         now = due + 60000; restored.tick(port)
         assertEquals(2, port.calls); assertEquals(listOf("run-1"), port.statusCalls)
         assertEquals("unavailable", restored.get(id).getJSONArray("history").getJSONObject(0).getString("status"))
-        assertEquals("started", restored.get(id).getJSONArray("history").getJSONObject(1).getString("status"))
+        assertEquals("queued", restored.get(id).getJSONArray("history").getJSONObject(1).getString("status"))
     }
     @Test fun unavailableStatusAndTransientErrorsRemainRetryable() {
         for (failure in listOf(null, GatewayHttpException(401, "unauthorized"),
@@ -122,7 +122,7 @@ class ScheduleTest {
             assertEquals(listOf("run-1"), port.statusCalls)
             assertEquals(before, engine.get(id).getJSONArray("history").toString())
             repeat(2) { index ->
-                assertEquals("started", engine.get(id).getJSONArray("history").getJSONObject(index).getString("status"))
+                assertEquals("queued", engine.get(id).getJSONArray("history").getJSONObject(index).getString("status"))
             }
             assertEquals(savedBefore, disk)
             assertEquals(2, port.calls)
@@ -150,51 +150,82 @@ class ScheduleTest {
         assertTrue(restored.get(secondId).getLong("next_due_ms") > now)
         assertEquals(0, port.calls)
     }
-    @Test fun failureDisablesAndNeverCopiesRawError() {
-        var now = 100000L; val port = Port().apply { fail = true }
-        val engine = ScheduleEngine(null, {}, { now }, { "fixture" })
-        val id = engine.create(body(now + 1000)).getString("id"); now += 1000
-        engine.tick(port); engine.tick(port)
-        assertEquals(1, port.calls)
-        val job = engine.get(id)
-        assertFalse(job.getBoolean("enabled")); assertFalse(job.toString().contains("secret"))
-        assertEquals("uncertain", job.getJSONArray("history").getJSONObject(0).getString("status"))
-    }
-    @Test fun saveFailureAfterCreateQuarantinesWithoutRestartAndReleasesGate() {
-        var now = 100000L; var writes = 0; var storageFails = true; var released = 0; var creates = 0
+    @Test fun uncertainAdmissionRetriesSameClaimAndSnapshotAfterRestart() {
+        var now = 100000L; var disk: String? = null; var lostResponse = true
+        val runs = mutableMapOf<String, String>(); val requests = mutableListOf<String>()
         val port = object : SchedulePort {
             override fun readiness(job: JSONObject): String? = null
-            override fun create(job: JSONObject): String { creates++; return "run-$creates" }
+            override fun create(job: JSONObject): String {
+                requests += job.toString()
+                val id = runs.getOrPut(job.getString("request_id")) { "run-${runs.size + 1}" }
+                if (lostResponse) { lostResponse = false; throw SocketTimeoutException("secret provider detail") }
+                return id
+            }
+            override fun start(runId: String) {}
+            override fun status(runId: String) = "queued"
+        }
+        var engine = ScheduleEngine(null, { disk = it }, { now }, { "fixture" })
+        val id = engine.create(body(now + 1000)).getString("id"); now += 1000
+        engine.tick(port)
+        assertEquals("dispatching", engine.get(id).getJSONArray("history").getJSONObject(0).getString("status"))
+        assertFalse(disk!!.contains("secret"))
+        assertEquals(now, engine.nextDue())
+        engine = ScheduleEngine(disk, { disk = it }, { now }, { "fixture" })
+        engine.update(id, JSONObject().put("goal", "Future goal"))
+        now += ScheduleEngine.GRACE_MS + 1
+        engine.tick(port); engine.tick(port)
+        assertEquals(1, runs.size); assertEquals(2, requests.size)
+        assertEquals(requests.first(), requests.last())
+        assertEquals("queued", engine.get(id).getJSONArray("history").getJSONObject(0).getString("status"))
+        assertEquals("run-1", engine.get(id).getJSONArray("history").getJSONObject(0).getString("run_id"))
+    }
+    @Test fun saveFailureAfterAdmissionRetriesOriginalIdAndDoesNotLoseOccurrence() {
+        var now = 100000L; var writes = 0; var storageFails = true; var released = 0
+        val runs = mutableMapOf<String, String>()
+        val port = object : SchedulePort {
+            override fun readiness(job: JSONObject): String? = null
+            override fun create(job: JSONObject): String = runs.getOrPut(job.getString("request_id")) { "run-${runs.size + 1}" }
             override fun start(runId: String) {}
             override fun status(runId: String): String? = null
             override fun finishDispatch() { released++ }
         }
         val engine = ScheduleEngine(null, { writes++; if (storageFails && writes > 2) error("disk unavailable") }, { now }, { "fixture" })
-        val id = engine.create(body(now + 1).put("rule", JSONObject().put("kind", "interval").put("every_ms", 60000).put("anchor_ms", now + 1000))).getString("id")
+        val id = engine.create(body(now + 1000)).getString("id")
         now += 1000
         assertThrows(IllegalStateException::class.java) { engine.tick(port) }
-        assertEquals(1, creates); assertEquals(1, released)
+        assertEquals(1, runs.size); assertEquals(1, released)
         storageFails = false; now += 60000; engine.tick(port)
-        assertEquals(1, creates); assertFalse(engine.get(id).getBoolean("enabled"))
+        assertEquals(1, runs.size); assertEquals(2, released)
+        assertEquals("queued", engine.get(id).getJSONArray("history").getJSONObject(0).getString("status"))
     }
-    @Test fun dispatchFinishesOnceOnSuccessCreateFailureAndStartFailure() {
-        for (failure in listOf("", "create", "start")) {
-            var now = 100000L; var releases = 0; var starts = 0
-            val port = object : SchedulePort {
-                override fun readiness(job: JSONObject): String? = null
-                override fun create(job: JSONObject): String { check(failure != "create"); return "fixture-run" }
-                override fun start(runId: String) { starts++; check(failure != "start") }
-                override fun status(runId: String): String? = null
-                override fun finishDispatch() { releases++ }
-            }
-            val engine = ScheduleEngine(null, {}, { now }, { "fixture" })
-            val id = engine.create(body(now + 1000)).getString("id")
-            now += 1000; engine.tick(port); engine.tick(port)
-            assertEquals("Release exactly the gate owned by this dispatch: $failure", 1, releases)
-            assertEquals(if (failure == "create") 0 else 1, starts)
-            assertEquals(if (failure.isEmpty()) "started" else "uncertain",
-                engine.get(id).getJSONArray("history").getJSONObject(0).getString("status"))
+    @Test fun wakeFailureDoesNotUndoAdmissionAndQueuedWaitSurvivesGrace() {
+        var now = 100000L; var releases = 0; var creates = 0
+        val port = object : SchedulePort {
+            override fun readiness(job: JSONObject): String? = null
+            override fun create(job: JSONObject): String { creates++; return "fixture-run" }
+            override fun start(runId: String) { error("foreground start unavailable") }
+            override fun status(runId: String) = "queued"
+            override fun finishDispatch() { releases++ }
         }
+        val engine = ScheduleEngine(null, {}, { now }, { "fixture" })
+        val id = engine.create(body(now + 1000)).getString("id")
+        now += 1000; engine.tick(port)
+        now += ScheduleEngine.GRACE_MS + 1; engine.tick(port)
+        assertEquals(1, creates); assertEquals(1, releases)
+        assertEquals("queued", engine.get(id).getJSONArray("history").getJSONObject(0).getString("status"))
+    }
+    @Test fun legacyUnkeyedDispatchIsStillQuarantined() {
+        var now = 100000L; var disk: String? = null
+        val engine = ScheduleEngine(null, { disk = it }, { now }, { "fixture" })
+        val id = engine.create(body(now + 1000)).getString("id")
+        val encoded = JSONObject(disk!!)
+        encoded.getJSONArray("items").getJSONObject(0).getJSONArray("history")
+            .put(JSONObject().put("status", "dispatching").put("scheduled_at_ms", now + 1000).put("run_id", JSONObject.NULL))
+        val restored = ScheduleEngine(encoded.toString(), { disk = it }, { now }, { "fixture" })
+        val port = Port(); now += 1000; restored.tick(port)
+        assertEquals(0, port.calls)
+        assertFalse(restored.get(id).getBoolean("enabled"))
+        assertEquals("uncertain", restored.get(id).getJSONArray("history").getJSONObject(0).getString("status"))
     }
     @Test fun connectionChangeDoesNotReadOldRunOnNewServer() {
         var now = 100000L; var binding = "server-a"; var lookups = 0

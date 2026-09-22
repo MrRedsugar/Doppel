@@ -5,7 +5,7 @@ import re
 import time
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from pydantic import Field
@@ -39,6 +39,7 @@ class DeviceInput(Model):
 class RunInput(Model):
     device_id: str
     goal: str = Field(min_length=1, max_length=12000)
+    title: str | None = Field(default=None, max_length=120)
     mode: str = "assist"
     allowed_packages: list[str] = Field(default_factory=list, max_length=40)
     parent_run_id: str | None = Field(default=None, min_length=1, max_length=128)
@@ -46,6 +47,9 @@ class RunInput(Model):
     # work remains a task record but is excluded from conversation history.
     conversation_enabled: bool = True
     source: Literal["user", "schedule", "trigger"] = "user"
+    request_id: str | None = Field(default=None,min_length=1,max_length=160,pattern=r"^[A-Za-z0-9_.:-]+$")
+    source_metadata: dict = Field(default_factory=dict)
+    defer_start: bool = False
 
 
 class AnswerInput(Model):
@@ -123,7 +127,18 @@ def create_router(runtime, owner_dependency):
         run = runtime.create_run(owner, body.device_id, body.goal, body.mode, body.allowed_packages,
                                  parent_run_id=body.parent_run_id,
                                  conversation_enabled=body.conversation_enabled,
-                                 source=body.source)
+                                 source=body.source, title=body.title, request_id=body.request_id, source_metadata=body.source_metadata, defer_start=body.defer_start)
+        if runtime.config.auto_start:
+            runtime.start_run(run.id)
+        return run
+
+    @router.get("/devices/{device_id}/queue")
+    def queue(device_id: str, owner=Depends(owner_dependency)):
+        return {"items": runtime.queue_snapshot(owner,device_id)}
+
+    @router.post("/runs/{run_id}/start")
+    async def start(run_id: str, owner=Depends(owner_dependency)):
+        run=runtime.start_queued(owner,run_id)
         if runtime.config.auto_start:
             runtime.start_run(run.id)
         return run
@@ -170,12 +185,17 @@ def create_router(runtime, owner_dependency):
         return runtime.pause_run(owner, run_id)
 
     @router.post("/runs/{run_id}/resume")
-    def resume(run_id: str, owner=Depends(owner_dependency)):
-        return runtime.resume_run(owner, run_id)
+    async def resume(run_id: str, owner=Depends(owner_dependency)):
+        run=runtime.resume_run(owner, run_id)
+        if runtime.config.auto_start:
+            runtime.start_run(run.id)
+        return run
 
     @router.post("/runs/{run_id}/cancel")
-    def cancel(run_id: str, owner=Depends(owner_dependency)):
-        return runtime.cancel_run(owner, run_id)
+    def cancel(run_id: str, body: dict = Body(default={}), owner=Depends(owner_dependency)):
+        if set(body) - {"expected_status"}:
+            raise ValueError("Invalid cancellation precondition")
+        return runtime.cancel_run(owner, run_id, body.get("expected_status"))
 
     @router.post("/runs/{run_id}/answer")
     def answer(run_id: str, body: AnswerInput, owner=Depends(owner_dependency)):

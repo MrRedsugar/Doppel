@@ -11,12 +11,14 @@ internal object DirectionalGestureContract {
     data class Intent(
         val semantics: String,
         val targetDirection: String,
-        val fingerDirection: String
+        val fingerDirection: String,
+        val startHoldMs: Int = 0
     ) {
         fun toJson() = JSONObject()
             .put("gesture_semantics", semantics)
             .put("target_relative_direction", targetDirection)
             .put("intended_finger_direction", fingerDirection)
+            .put("start_hold_ms", startHoldMs)
     }
 
     data class Validation(
@@ -124,7 +126,7 @@ internal object DirectionalGestureContract {
                 }
                 corrections.put(JSONObject(details.toString()).put("direction_corrected", true))
             }
-            effective += Intent(expected.semantics, if (expected.semantics == "physical_gesture") expected.targetDirection else target, finger)
+            effective += expected.copy(targetDirection = if (expected.semantics == "physical_gesture") expected.targetDirection else target, fingerDirection = finger)
         }
         return Resolution(success(JSONObject().put("checked_strokes", intents.size)
             .put("direction_corrections", corrections)), effective, corrections.length() > 0)
@@ -177,8 +179,10 @@ internal object DirectionalGestureContract {
         require(semantics in setOf("reveal_content", "physical_gesture", "object_drag")) { "gesture_semantics 无效" }
         val target = requiredDirection(value, "target_relative_direction", allowUnknown = semantics != "reveal_content")
         val finger = requiredDirection(value, "intended_finger_direction")
+        val startHold = SplitAgentProtocol.duration(value, "start_hold_ms", 0, 0, 3000)
+        require(startHold == 0 || semantics == "object_drag") { "仅对象拖放可设置起点长按" }
         // Preserve A's original intent even when contradictory: B must see and explicitly correct it.
-        return Intent(semantics, target, finger)
+        return Intent(semantics, target, finger, startHold)
     }
 
     private fun requiredDirection(value: JSONObject, key: String, allowUnknown: Boolean = false): String {

@@ -48,7 +48,7 @@ class AutomaticUnlockSettingsDeviceTest {
     private val automation get() = inst.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
     private val credentials by lazy { Class.forName("dev.doppel.sdk.AutomaticUnlockCredentials").getField("INSTANCE").get(null) }
     private var activity: Activity? = null
-    private val promptTitle = "确认自动解锁设置"
+    private var promptTitle = "确认自动解锁设置"
     private val fixturePin = "681429"
 
     private fun call(name: String) = credentials.javaClass.getMethod(name, Context::class.java).invoke(credentials, context)
@@ -289,6 +289,27 @@ class AutomaticUnlockSettingsDeviceTest {
             assertFalse("Disk must not contain a plaintext PIN", String(encrypted, Charsets.ISO_8859_1).contains(fixturePin))
             assertTrue(keyStore.containsAlias(alias))
             report.put("native_authentication_saved", true).put("encrypted_read_matches", true)
+
+            stage = "lan_handoff_opt_in"
+            fun toggleLan() = mainViews { nodes ->
+                val switch = nodes.filterIsInstance<android.widget.Switch>().single { it.text.toString() == "同一局域网免密码接管" }
+                assertTrue(switch.isEnabled); switch.performClick()
+            }
+            assertEquals("LAN handoff must default off", false, call("isLanHandoffEnabled"))
+            promptTitle = "确认免密码接管设置"
+            toggleLan(); cancelNativeForm()
+            assertEquals("Cancelling system authentication must retain opt-out", false, call("isLanHandoffEnabled"))
+            toggleLan(); authenticateNormally()
+            await("LAN opt-in requires fresh system authentication") { call("isLanHandoffEnabled") == true && authenticationNodes().isEmpty() }
+            close(); open()
+            assertEquals("LAN opt-in persists when settings reopen", true, call("isLanHandoffEnabled"))
+            assertTrue("LAN opt-in must not rewrite the saved lock credential", encrypted.contentEquals(file.readBytes()))
+            toggleLan()
+            assertEquals("LAN opt-out takes effect without a password", false, call("isLanHandoffEnabled"))
+            assertTrue(authenticationNodes().isEmpty())
+            report.put("lan_handoff_default_off", true).put("lan_handoff_native_auth_and_cancel", true)
+                .put("lan_handoff_persisted_and_disabled", true).put("lan_handoff_kept_credential", true)
+            promptTitle = "确认自动解锁设置"
 
             stage = "ascii_keyboard_cancel_and_lifecycle_wipe"
             close(); open(); assertTrue(enabled())

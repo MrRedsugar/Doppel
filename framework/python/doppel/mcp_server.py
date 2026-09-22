@@ -56,8 +56,8 @@ async def finish_task(outcome: Literal["completed", "failed"], summary: str, evi
 
 
 @server.tool()
-async def act(action: Literal["launch", "tap", "long_press", "type", "scroll", "back", "home", "recents", "notifications", "quick_settings", "split_screen", "wait", "open_document"], target: str | None = None, screen_id: str | None = None, text: str | None = None, package_name: str | None = None, direction: Literal["up", "down", "left", "right"] | None = None, duration_ms: int | None = None, uri: str | None = None, desired_checked: Annotated[StrictBool | None, Field(description="Tap only: intended checked state, required for a checkable control. An already satisfied state returns an observed no-op.")] = None, task_state: TaskStateUpdate | None = None) -> dict:
-    """Execute one device action, then inspect the result. Tap/long_press/type require current screen_id and target. Checkable taps require desired_checked; use observe to verify state. Long press requires a long_press node and uses Android's action duration. Ordinary payments require device delegated_payment=enabled and host approval policy; credentials, transfers and persistent mandates stay manual. A successful tap does not prove payment success."""
+async def act(action: Literal["launch", "tap", "pay", "long_press", "type", "scroll", "back", "home", "recents", "notifications", "quick_settings", "split_screen", "wait", "open_document"], target: str | None = None, screen_id: str | None = None, text: str | None = None, package_name: str | None = None, direction: Literal["up", "down", "left", "right"] | None = None, duration_ms: int | None = None, uri: str | None = None, desired_checked: Annotated[StrictBool | None, Field(description="Tap only: intended checked state, required for a checkable control. An already satisfied state returns an observed no-op.")] = None, task_state: TaskStateUpdate | None = None) -> dict:
+    """Execute one device action, then inspect the result. Use pay only for an action that actually submits a payment, based on the current screen and user goal. Browsing orders or payment history uses tap. Payment requires full task access plus the device payment switch; payment credentials, transfers and recurring mandates remain manual. Tap/long_press/type require current screen_id and target. Checkable taps require desired_checked. Long press uses Android's action duration. An accepted action does not prove business success."""
     arguments = dict(locals())
     if task_state is None:
         arguments.pop("task_state")
@@ -94,24 +94,6 @@ async def ask_user(question: str) -> dict:
 async def describe_screen(question: str) -> dict:
     """Use auxiliary vision for unlabeled icons or layout that cannot be understood from the node text. May incur usage."""
     return await invoke("describe_screen", {"question": question})
-
-
-@server.tool()
-async def list_skills() -> dict:
-    """List available reusable skills and their declared runtime requirements."""
-    return await invoke("list_skills", {})
-
-
-@server.tool()
-async def read_skill(name: str) -> dict:
-    """Load a selected skill's instructions; loading never grants execution permissions."""
-    return await invoke("read_skill", {"name": name})
-
-
-@server.tool()
-async def read_skill_resource(name: str, path: str) -> dict:
-    """Read a bounded relative resource from an installed skill."""
-    return await invoke("read_skill_resource", {"name": name, "path": path})
 
 
 @server.tool()

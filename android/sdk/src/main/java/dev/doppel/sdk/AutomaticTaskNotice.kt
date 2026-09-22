@@ -36,7 +36,7 @@ internal object AutomaticTaskNotice {
     fun localBlockReason(context: Context, ownGate: Boolean = false): String? {
         if (!FirstUseConsent.isAccepted(context) || !ReleaseIntegrity.isTrusted(context)) return "consent_required"
         if ((!ownGate && TaskSubmissionGate.creating.get()) || VoiceActivity.isVisible ||
-            PaymentConsent.settingsVisible || DirectMode.settingsVisible || DemonstrationSession.active || AccessibilityControlPicker.active) return "device_busy"
+            PaymentConsent.settingsVisible || DirectMode.settingsVisible || AccessibilityControlPicker.active) return "device_busy"
         val keyguard = context.getSystemService(KeyguardManager::class.java)
         if (keyguard.isDeviceLocked || keyguard.isKeyguardLocked ||
             !context.getSystemService(PowerManager::class.java).isInteractive) return "device_locked"
@@ -81,7 +81,7 @@ internal object AutomaticTaskNotice {
             try {
                 notice.manager = host.getSystemService(WindowManager::class.java)
                 val width = minOf(UiTheme.dp(host, 350), host.resources.displayMetrics.widthPixels - UiTheme.dp(host, 32)).coerceAtLeast(1)
-                notice.manager!!.addView(panel, WindowManager.LayoutParams(width, -2,
+                TemporaryScreenshotExclusion.addView(notice.manager!!, panel, WindowManager.LayoutParams(width, -2,
                     WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
                     PixelFormat.TRANSLUCENT).apply { gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = UiTheme.dp(host, 24) })

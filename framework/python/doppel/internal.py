@@ -117,10 +117,10 @@ def create_internal_router(runtime):
                 return answer
             return result.model_dump(exclude_none=True)
         if name == "act":
-            if "payment_consent_id" in args:
-                raise HTTPException(422, "payment_consent_id is a host-only field supplied from the device observation")
+            if "payment_consent_id" in args or "mode" in args:
+                raise HTTPException(422, "mode and payment_consent_id are host-only fields")
             kind = args.pop("action", None)
-            if kind not in {"launch", "tap", "long_press", "type", "scroll", "back", "home", "recents", "notifications", "quick_settings", "split_screen", "wait", "open_document"}:
+            if kind not in {"launch", "tap", "pay", "long_press", "type", "scroll", "back", "home", "recents", "notifications", "quick_settings", "split_screen", "wait", "open_document"}:
                 raise HTTPException(422, "Unsupported device action")
             fields = {key: value for key, value in args.items() if value is not None}
             result = await runtime.perform(run_id, kind, **fields)
@@ -199,18 +199,6 @@ def create_internal_router(runtime):
                 return {"status": "error", "error": "vision_empty",
                         "message": "Vision returned no usable description; do not infer targets from this response. No automatic retry was made."}
             return {"status": "ok", "description": description, "screen": compact_observation(observation), "coordinates": coordinates}
-        if name in {"list_skills", "read_skill", "read_skill_resource"}:
-            from .errors import NotFound
-            from .skill_library import get_skill_library
-            catalog = get_skill_library(runtime)
-            try:
-                if name == "list_skills":
-                    return {"items": catalog.list_skills(owner)}
-                if name == "read_skill":
-                    return catalog.read_skill(owner, args["name"])
-                return {"content": catalog.read_resource(owner, args["name"], args["path"])}
-            except NotFound:
-                raise FileNotFoundError('Skill resource not found') from None
         if name in {"list_documents", "inspect_document", "transform_document"}:
             from .documents import WorkspaceDocuments
             folder = runtime.config.data_dir / "documents" / owner

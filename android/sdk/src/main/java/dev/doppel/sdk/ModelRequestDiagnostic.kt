@@ -80,8 +80,7 @@ internal object ModelRequestDiagnostic {
     private const val PNG_PREFIX = "data:image/png;base64,"
     private val pngSignature = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10)
     // Only host vocabulary is persisted; arbitrary unknown names may themselves contain private data.
-    private val toolNames = setOf("action", "navigate", "launch", "search_web", "read_web", "list_skills",
-        "load_skill", "read_skill_resource", "visual_action", "inspect_screen", "ask_user", "finish",
+    private val toolNames = setOf("action", "navigate", "launch", "search_web", "read_web", "visual_action", "inspect_screen", "ask_user", "finish",
         "observe_screen", "locate_ui", "execute_plan", "execute_visual_plan", "plan_task", "set_task_plan",
         "propose_tap", "propose_long_press", "propose_swipe", "cannot_ground")
 

@@ -148,7 +148,7 @@ def test_host_observation_detects_challenge_before_any_mutation(tmp_path):
 
 
 @pytest.mark.parametrize("kind", ["long_press", "login_phone", "login_code"])
-def test_new_commands_require_fresh_target_and_retain_manual_payment_boundaries(kind):
+def test_native_commands_preserve_target_and_private_input_checks_without_payment_word_inference(kind):
     fields = {"package_name": "fixture.app"} if kind.startswith("login_") else {}
     command = Command(id="command", run_id="run", kind=kind, target="target", screen_id="fresh", **fields)
     observation = screen()
@@ -157,7 +157,7 @@ def test_new_commands_require_fresh_target_and_retain_manual_payment_boundaries(
     assert ActionPolicy().evaluate("ask", command, observation).decision == "approve"
     assert ActionPolicy().evaluate("full", command.model_copy(update={"screen_id": "old"}), observation).decision == "deny"
     observation.nodes[0].text = "立即支付"
-    assert ActionPolicy().evaluate("full", command, observation).decision == "manual"
+    assert ActionPolicy().evaluate("full", command, observation).decision == "allow"
     observation.nodes[0].text = "Continue"
     observation.nodes[0].password = True
     assert ActionPolicy().evaluate("full", command, observation).decision == "manual"

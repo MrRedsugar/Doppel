@@ -128,7 +128,9 @@ class SplitNativeToolsTest {
             val (engine, id) = start(direct)
             val work = engine.takeWork()!!
             assertTrue(context(work).getJSONObject("login_assist").getBoolean("enabled"))
-            engine.accept(work, reply(action(kind).put("package_name", "dev.fixture")))
+            engine.accept(work, reply(action(kind).put("package_name", "dev.fixture").apply {
+                if (kind == "login_code") put("code_candidate_id", JSONObject.NULL)
+            }))
             val native = engine.poll().getJSONObject("command")
             assertEquals(kind, native.getString("kind")); assertFalse(native.has("text")); assertFalse(native.has("points"))
             result(engine, JSONObject().put("action_state", if (kind == "login_code") "waiting_for_code" else "accepted").put("retry_after_ms", 1500))
@@ -146,10 +148,65 @@ class SplitNativeToolsTest {
                 action("volume").put("stream", "voice_call").put("percent", 20),
                 action("volume").put("stream", "media").put("percent", 101),
                 action("copy").put("selection", "guess"),
-                action("login_code").put("package_name", "dev.fixture").put("text", "123456"),
+                action("login_code").put("package_name", "dev.fixture").put("code_candidate_id", JSONObject.NULL).put("text", "123456"),
                 read("read_calendar").put("days", 100),
                 JSONObject().put("kind", "read_clipboard").put("run_id", "invented")
             )) assertThrows(SplitSchemaViolation::class.java) { SplitAgentProtocol.content(reply(bad), schema, "primary") }
+        }
+    }
+
+    @Test fun codeCandidateSelectionIsLocalAndStrictlyNullableInBothVisualModes() {
+        for (direct in listOf(false, true)) for (candidate in listOf(null, "candidate-2")) {
+            val (engine, _) = start(direct)
+            val request = action("login_code").put("package_name", "dev.fixture")
+                .put("code_candidate_id", candidate ?: JSONObject.NULL)
+            engine.accept(engine.takeWork()!!, reply(request))
+            val native = engine.poll().getJSONObject("command")
+            assertEquals("login_code", native.getString("kind"))
+            assertEquals(candidate, native.opt("code_candidate_id"))
+            assertFalse(native.has("text")); assertNull(engine.takeWork())
+            val schema = SplitOutputSchema.format("primary", direct)
+            for (invalid in listOf("", "x".repeat(129), 42)) {
+                assertThrows(SplitSchemaViolation::class.java) {
+                    SplitAgentProtocol.content(reply(JSONObject(request.toString()).put("code_candidate_id", invalid)), schema, "primary")
+                }
+            }
+            request.remove("code_candidate_id")
+            assertThrows(SplitSchemaViolation::class.java) { SplitAgentProtocol.content(reply(request), schema, "primary") }
+        }
+    }
+
+    @Test fun smsRequestAndResendFollowOnlyPlannerIntentThroughDirectAndGroundedTap() {
+        for (direct in listOf(false, true)) {
+            val (engine, id) = start(direct)
+            // A prefilled phone needs no login_phone command; an ordinary later tap must not inherit the flag.
+            for (flag in listOf(true, true, JSONObject.NULL)) {
+                val planner = engine.takeWork()!!
+                val prompt = planner.payload.getJSONArray("messages").getJSONObject(0).getString("content")
+                assertTrue(prompt.contains("手机号已预填")); assertTrue(prompt.contains("重发"))
+                assertFalse(prompt.contains("signature_matches_hint"))
+                val request = action("tap").put("target", "当前步骤的继续按钮").put("request_login_code", flag)
+                if (direct) request.put("points", JSONArray("[[400,600]]"))
+                engine.accept(planner, reply(request))
+                assertEquals(flag, engine.get(id).getJSONObject("last_intent").get("request_login_code"))
+                if (!direct) {
+                    screenshot(engine)
+                    val grounder = engine.takeWork()!!
+                    assertTrue(grounder.grounding)
+                    assertFalse("B does not receive or decide the SMS monitoring intent", grounder.payload.toString().contains("request_login_code"))
+                    engine.accept(grounder, reply(JSONObject().put("status", "located").put("action", "tap")
+                        .put("points", JSONArray("[[400,600]]")).put("assessment", JSONObject().put("alignment", "consistent"))))
+                }
+                val command = engine.poll().getJSONObject("command")
+                assertEquals("split_action", command.getString("kind"))
+                assertEquals(flag, command.getJSONObject("semantic_intent").get("request_login_code"))
+                assertFalse(command.getJSONObject("action").has("request_login_code"))
+                assertEquals("dev.fixture", command.getJSONObject("source").getString("package_name"))
+                result(engine); screenshot(engine)
+            }
+            val metrics = engine.get(id).getJSONObject("model_metrics")
+            assertEquals("No extra planner request is needed", 3, metrics.getJSONObject("primary").getInt("calls"))
+            assertEquals(if (direct) 0 else 3, metrics.optJSONObject("grounding")?.optInt("calls") ?: 0)
         }
     }
 }

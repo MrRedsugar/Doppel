@@ -1,10 +1,13 @@
 # Android SDK and Developer App
 
 Public modules target Android 26+, compile/target SDK 35, Kotlin 2.1.20,
-Android Gradle Plugin 8.9.2 and Gradle 8.11.1. Use JDK 17 or a newer compatible JDK.
+Android Gradle Plugin 8.9.2 and Gradle 8.11.1. Use JDK 21 for the complete build,
+including the pinned Office parser; Android Java/Kotlin bytecode targets remain 17.
 The developer app supports a phone-local model connection in developer debug
 builds and the standalone public gateway. The phone-local path uses
 `SplitTaskEngine`; the Python gateway retains its existing Harness executor.
+Local use is BYOK: users configure their own provider API keys, with no bundled
+first-party model service, free quota or private backend deployment.
 See [model connections](model-connections.md) and the
 [Android execution architecture](../architecture/qwen-device-loop.md).
 
@@ -21,11 +24,15 @@ JobScheduler integration, gateway API and missed-execution/restart semantics.
 
 The native client opens a phone-task entry with a bottom composer. Side navigation
 offers New task, Current task when a run exists, Schedules, Records and Settings;
-the developer app also adds Usage. There is no Files navigation page or general
-chat assistant. Saved drafts, execution modes, pause/resume/cancel, approval and
+the developer app also adds Usage. There is no Files navigation page. The current
+client supports conversations, editable message versions and local long-term
+memory. Users discuss corrections in chat and manage saved preferences in
+Settings; memory cannot grant task permissions. Images and documents belong to
+their conversation, and models request bounded info/search/read excerpts rather
+than receiving entire documents automatically. Saved drafts, execution modes, pause/resume/cancel, approval and
 human takeover controls remain available. Settings include model connections,
-offline Chinese recognition, visual enhancement, extensions/Skills and application
-learning through manual demonstrations, described workflows and Skill editing.
+offline Chinese recognition, visual enhancement, extensions and editable long-term memory.
+Skills and application learning are no longer runtime features.
 Translucent sheets and restrained highlights share a neutral theme with the voice
 and login settings.
 
@@ -58,15 +65,24 @@ APK assets. The vectors require no icon runtime dependency.
 
 ## Build and Connect
 
-Set JAVA_HOME and ANDROID_HOME for your local JDK and Android SDK. From the
-repository root, prepare the pinned Chinese speech archives once, then build:
+Set JAVA_HOME and ANDROID_HOME for JDK 21 and your Android SDK. From the
+repository root, rebuild the pinned Office parser and prepare speech archives:
 
 ```sh
+python scripts/prepare-android-office-parser.py
 python scripts/prepare-embedded-tts.py --download
 python scripts/prepare-embedded-asr.py --download
 cd android
 ./gradlew :sdk:testDebugUnitTest :developer-app:assembleDebug :test-app:assembleDebug
 ```
+
+The Office script uses the included Gradle wrapper and respects `JAVA_HOME` and
+`GRADLE_USER_HOME`; it requires no private toolchain installation. It verifies
+fixed upstream-source and rebuilt-jar hashes and preserves dependency notices.
+The generated `android/sdk/libs/poi-android-5.5.1.jar` is excluded from source
+exports and must be rebuilt before compiling. Recheck it with
+`python scripts/prepare-android-office-parser.py --verify-only`. See
+[Office parser provenance and build instructions](../../android/sdk/libs/README.md).
 
 TTS preparation verifies its approximately 147 MB download before generating assets. Later builds
 use the cached `.tooling/tts` archive, including after Gradle clean. The Gradle
@@ -88,9 +104,12 @@ On Windows use gradlew.bat. APKs appear in each module's build/outputs/apk/debug
 Build an SDK AAR with `./gradlew :sdk:assembleRelease`; the output is
 sdk/build/outputs/aar/sdk-release.aar. AAR consumers also need Kotlin stdlib and
 AndroidX Core 1.15.0, Vosk Android 0.3.75, JNA 5.18.1 (Android AAR) and ONNX Runtime
-Android 1.22.0. Direct public web research and local Skills also require
+Android 1.22.0. Public web/document reading also requires
 `com.squareup.okhttp3:okhttp:4.12.0`, `org.jsoup:jsoup:1.18.3` and
-`org.yaml:snakeyaml:2.4`. Declare these Maven dependencies so their own dependencies
+`com.tom-roush:pdfbox-android:2.0.27.0` (including its Bouncy Castle dependencies).
+The rebuilt local POI jar is packaged by the library build. Overlay capture uses
+`org.lsposed.hiddenapibypass:hiddenapibypass:6.1`.
+Declare these Maven dependencies so their own dependencies
 (including Okio for OkHttp) resolve; a standalone AAR does not embed transitive
 libraries. Gradle project consumers resolve these automatically. Every host **application module** must add
 `androidResources { noCompress += "onnx" }` inside its `android` block, keeping
@@ -112,12 +131,18 @@ dev.doppel.developer and dev.doppel.testapp; these are development identifiers.
 For phone-local execution, open Settings > Model settings (the page title is
 Model connections), save your provider credentials, select the default and optional
 independent visual model, verify both effective models' image capability, then
-enable the local connection. The initial preset uses Qwen `qwen3.8-flash` with
-thinking at low effort and independent `qwen3.8-max` visual enhancement with
-thinking disabled. Custom OpenAI-compatible platforms and separate enhancement
+enable the local connection. The initial preset uses Qwen `qwen3.8-flash` and
+optional independent `qwen3.8-max` visual enhancement; both disable thinking in
+the current preset. Custom OpenAI-compatible platforms and separate enhancement
 credentials are supported. Android Keystore encrypts the saved provider
 configuration; task text and screenshots go to the selected model platforms.
 See [model connections](model-connections.md) for setup and capability checks.
+
+The optional `dev.doppel.sdk.cloud` client handles account sessions and remote
+task connections only when a host configures a compatible backend. The source
+export does not provide that private backend, hosted accounts, credentials or
+model service. This integration is distinct from the public gateway below and
+is not a prerequisite for phone-local BYOK execution.
 
 For gateway execution, start the standalone gateway as described in
 [standalone setup](standalone.md). Enter its reachable base URL (without /v1)
@@ -137,7 +162,7 @@ use HTTPS and appropriate authentication/network controls beyond a trusted LAN.
 The client records the exact preview terms/privacy versions accepted by the
 user. Missing, withdrawn or outdated consent routes retained voice/task-window
 entry points back through onboarding. New task processing, recording and provider
-or document/Skill uploads require accepted consent; read access, pause/cancel and
+or document/image attachment submission require accepted consent; read access, pause/cancel and
 deletion/cleanup paths remain available. API credentials, Android permissions
 and server authentication remain separate checks.
 
@@ -187,24 +212,33 @@ verification remain manual. This is a conservative safeguard, not proof that eve
 unlabeled or malicious payment UI can be recognized. See
 [delegated payment](payment-delegation.md) for consent, revocation and retry limits.
 
-API 30+ screenshots can use Android's accessibility screenshot API. API 26–29
-supports an explicitly authorized foreground MediaProjection session; an enabled
-authorized ADB helper provides another capture backend. See
-[device compatibility](device-compatibility.md). Images retain their aspect ratio
-and are reduced only above a longest edge of 1,920 pixels. The host preserves
-original display dimensions, image dimensions and rotation for coordinate mapping;
-all backends use the same observation, provenance and privacy checks.
-Android may reject protected surfaces or
-redact them in a returned image; the SDK does not bypass that protection. Denied
-requests and timeouts fail explicitly. Screenshot requests bind the acquisition
-interval to observations before and after capture. Package, window, navigation,
-geometry or acquisition-source changes reject the image. Semantic changes within
-the same window/navigation are recorded explicitly; tree and pixels are not
-claimed to be an atomic read. The SDK removes action feedback and hides companion/perimeter pixels
-before capture; the companion keeps its touch region so a takeover touch cannot
-fall through to the application below. Restoration runs on both success and
-failure. A worker or companion revision change discards the captured image as
-stale. These screen hashes describe accessibility state, not game-frame identity.
+The current screenshot path captures the full default display. API 30+ uses
+Android's accessibility screenshot API; API 26–29 requires an explicitly authorized
+foreground MediaProjection session. Retained shell-helper APIs are not selected
+as a screenshot backend by this path. Images retain their aspect ratio and are
+reduced only above a longest edge of 1,920 pixels. Original display dimensions,
+image dimensions and rotation are retained for coordinate mapping.
+
+On API 34+, `TemporaryScreenshotExclusion` temporarily sets `SKIP_SCREENSHOT` on
+this process's application/accessibility overlay surfaces, waits for the surface
+transaction, captures once, then clears the flags in cleanup, including on
+cancellation or failure. The overlays stay visible and their input regions do
+not change. It does not crop/compose individual app windows or reconstruct hidden
+pixels from transparency. Other visible windows, including ordinary system
+dialogs, remain part of the full-display capture. User screenshots or recordings
+taken during this short interval can also omit these overlays. Missing/replaced
+overlay surfaces or unavailable exclusion APIs return a stale/error result;
+there is no silent switch to hiding overlays. API 26–33 uses full-display capture
+without this exclusion, so overlay-free output is not guaranteed there.
+
+Android may reject protected surfaces or redact them; the SDK does not bypass
+that protection. Locked/noninteractive devices and sensitive settings or local
+authentication are blocked, and known private regions are masked. Requests check
+window identity, package/navigation, geometry and private-region state around
+capture; inconsistent or cancelled results are not delivered as current images.
+Semantic changes within the same window/navigation are recorded explicitly;
+tree and pixels are not claimed to be an atomic read. These screen hashes
+describe accessibility state, not game-frame identity.
 The retained node-based executor can return a settled observation, sampling every
 250 ms for up to 1.5 seconds and seeking three matching snapshots without replaying
 the action. `SplitTaskEngine` does not introduce this automatic stability wait:
@@ -301,7 +335,18 @@ and contextual pronunciations remain documented limitations. See
 [Embedded Chinese Speech](embedded-chinese-tts.md) for reproducible preparation,
 license sources and the distinction between desktop fixtures and device evidence.
 
-The retained document APIs support authorized .xlsx streams through Android's
+Chat attachment imports support images and local text, PDF and Office files.
+Documents are converted locally when their read tool is invoked, with bounded
+search and character paging; screenshots and selected excerpts may then be sent
+to the user's model provider. PDFBox and POI perform parsing without a separate
+conversion server. Scanned PDFs without text require OCR not supplied by this
+reader. Public webpages use an isolated local WebView with Jina Markify,
+Readability and the MSW browser network interceptors. Local webpage rendering
+requires Android 28+ and a current WebView; it is not an authenticated browser
+session. See [public web research](web-research.md) for network, cancellation,
+paging and screenshot limits.
+
+The retained gateway document APIs support authorized .xlsx streams through Android's
 document picker; the current task navigation has no Files page.
 The gateway transforms copies and returns doppel-document://name.xlsx; the client
 validates filenames, disables redirects, limits downloads to 20 MiB and shares
@@ -342,9 +387,11 @@ and a stable named control for testing bounded target revalidation. Fixture
 presence is not a claim that
 every visual task or speech-recognition provider has passed an end-to-end test.
 
-Runtime dependencies are Kotlin stdlib, AndroidX Core, Vosk Android, JNA,
-ONNX Runtime Android, OkHttp 4.12.0, jsoup 1.18.3 and SnakeYAML 2.4.
-See [public web research](web-research.md) and [phone-local Skills](direct-skills.md)
+Runtime dependencies include Kotlin stdlib, AndroidX Core, Vosk Android, JNA,
+ONNX Runtime Android, OkHttp, jsoup, PDFBox-Android, Bouncy Castle, the rebuilt
+POI Android adapter and HiddenApiBypass. The Jina/Readability/MSW browser assets
+and their licenses are included; no Node or Docker runtime is bundled.
+See [public web research](web-research.md)
 for the knowledge APIs and raw AAR dependency requirements.
 JUnit is test-only.
 Lucide notices accompany the icon assets. See THIRD_PARTY_NOTICES.md in the repository root

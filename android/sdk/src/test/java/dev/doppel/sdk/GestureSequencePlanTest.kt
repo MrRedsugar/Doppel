@@ -4,6 +4,20 @@ import org.junit.Assert.*
 import org.junit.Test
 import kotlin.random.Random
 class GestureSequencePlanTest {
+    @Test fun dragHoldSurvivesNormalizationAndCountsTowardCompletePlanTime() {
+        val input = JSONObject("""{"status":"located","action":"swipe_sequence","interval_ms":150,"strokes":[{"points":[[100,100],[700,100]],"duration_ms":700,"start_hold_ms":800},{"points":[[700,100],[800,100]],"duration_ms":300}]}""")
+        val once = SplitAgentProtocol.grounding(input, "swipe_sequence")
+        val twice = SplitAgentProtocol.grounding(once, "swipe_sequence")
+        assertEquals(once.toString(), twice.toString())
+        val plan = GestureSequencePlan.from(twice, 1000, 2000)
+        assertEquals(listOf(800L, 0L), plan.strokes.map { it.startHoldMs })
+        assertEquals(listOf(700L, 300L), plan.strokes.map { it.durationMs })
+        assertEquals(listOf(1500L, 300L), plan.strokes.map { it.totalMs })
+        assertEquals(1950L, plan.totalMs)
+        assertEquals(100f, plan.strokes.first().points.first().x, 0f)
+        assertEquals(700f, plan.strokes.first().points.last().x, 0f)
+    }
+
     @Test fun onlyTapContactDurationVariesWhileCoordinatesAndDoubleTapGapStayExact() {
         val random=Random(41)
         val durations=mutableSetOf<Long>()

@@ -18,9 +18,8 @@ import android.widget.LinearLayout
 import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
 
-/** A visible, expiring user choice; a background trigger never cancels another task. */
+/** Legacy notification compatibility. New automatic tasks enter the shared queue directly. */
 internal object AutomaticTaskConflict {
     private const val LIFETIME_MS = 300000L
     private const val CHANNEL = "automatic_task_conflicts"
@@ -39,8 +38,8 @@ internal object AutomaticTaskConflict {
     fun notificationSettingsView(activity: Activity): View = LinearLayout(activity).apply {
         orientation = LinearLayout.VERTICAL
         val allowed = notificationsAllowed(activity)
-        addView(UiTheme.text(activity, if (allowed) "自动任务提醒已开启。任务冲突时会发消息，可选择结束当前任务后继续执行。" else
-            "请允许通知。否则任务冲突时无法显示「继续执行」按钮，自动任务会保持等待。", 13f, UiTheme.muted))
+        addView(UiTheme.text(activity, if (allowed) "自动任务提醒已开启。触发的任务会按顺序排队，轮到执行时会提醒。" else
+            "请允许通知，以接收自动任务的状态提醒；队列顺序不受通知开关影响。", 13f, UiTheme.muted))
         addView(UiTheme.command(activity, if (allowed) "自动任务通知设置" else "开启自动任务通知") {
             if (Build.VERSION.SDK_INT >= 33 && activity.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
                 activity.requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 8342)
@@ -68,7 +67,7 @@ internal object AutomaticTaskConflict {
             val now = SystemClock.elapsedRealtime()
             if (lastNotificationWarning == 0L || now - lastNotificationWarning >= 60000L) {
                 lastNotificationWarning = now
-                main.post { Toast.makeText(app, "自动任务被中断；请在定时任务或自动触发设置中开启通知，才能选择继续执行", Toast.LENGTH_LONG).show() }
+                main.post { Toast.makeText(app, "请在系统通知设置中允许自动任务提醒", Toast.LENGTH_LONG).show() }
             }
             return false
         }
@@ -83,7 +82,7 @@ internal object AutomaticTaskConflict {
                 .also { pending[it.token] = it }
         }
         return try {
-            manager.createNotificationChannel(NotificationChannel(CHANNEL, "自动任务中断提醒", NotificationManager.IMPORTANCE_HIGH))
+            manager.createNotificationChannel(NotificationChannel(CHANNEL, "自动任务提醒", NotificationManager.IMPORTANCE_HIGH))
             val action = PendingIntent.getActivity(app, request.token.hashCode(),
                 Intent(app, AutomaticTaskConflictActivity::class.java).putExtra("token", request.token)
                     .setAction("dev.doppel.automatic_conflict.${request.token}")
@@ -92,108 +91,40 @@ internal object AutomaticTaskConflict {
             val details = PendingIntent.getActivity(app, request.token.hashCode() xor 0x40000000,
                 Intent(app, if (source.optString("kind") == "schedule") ScheduleActivity::class.java else AutoTriggerSettingsActivity::class.java),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-            val message = "自动任务被中断，请先结束当前任务。点击「继续执行」会结束当前任务，并立即执行这项自动任务。\n${source.optString("goal").take(160)}"
+            val message = "已有任务正在执行。点击「加入队列」后，自动任务会按顺序执行。\n${source.optString("goal").take(160)}"
             manager.notify(request.token, 1, Notification.Builder(app, CHANNEL).setSmallIcon(UiIcons.history)
-                .setContentTitle("自动任务被中断，请先结束当前任务")
-                .setContentText("继续执行会结束当前任务，并立即执行自动任务")
+                .setContentTitle("自动任务等待入队")
+                .setContentText("加入队列后按顺序执行")
                 .setStyle(Notification.BigTextStyle().bigText(message)).setVisibility(Notification.VISIBILITY_PRIVATE)
-                .setContentIntent(details).addAction(Notification.Action.Builder(null, "继续执行", action).build())
+                .setContentIntent(details).addAction(Notification.Action.Builder(null, "加入队列", action).build())
                 .setTimeoutAfter(LIFETIME_MS).setOnlyAlertOnce(true).build())
             main.postDelayed({ synchronized(pending) { if (pending[request.token] === request) pending.remove(request.token) } }, LIFETIME_MS)
             true
         } catch (_: Exception) { synchronized(pending) { pending.remove(request.token) }; false }
     }
 
-    /** The notification carries only a random token; neither it nor another app can supply a task to cancel. */
+    /** Old notification actions now admit their source to FIFO; they never cancel an existing task. */
     fun accept(context: Context, token: String, complete: (Boolean, String) -> Unit) {
         val app = context.applicationContext
-        val request = synchronized(pending) { pending[token]?.takeUnless { it.claimed } }
+        val request = synchronized(pending) {
+            pending[token]?.takeUnless { it.claimed }?.also { it.claimed = true }
+        }
         if (request == null) { complete(false, "这条提醒已处理或已失效"); return }
-        if (AutomaticUnlockSession.active) {
-            complete(false, "请先长按悬浮窗并验证密码，结束当前任务后再点击继续执行"); return
-        }
-        if (!TaskSubmissionGate.creating.compareAndSet(false, true)) { complete(false, "正在处理其他任务，请稍后重试"); return }
-        val claimed = synchronized(pending) {
-            if (pending[token] !== request || request.claimed) false else { request.claimed = true; true }
-        }
-        if (!claimed) { TaskSubmissionGate.creating.set(false); complete(false, "这条提醒正在处理"); return }
-        val gateway = Gateway(app)
-        val ticket = TaskControl.currentGeneration()
-        val ownsGate = AtomicBoolean(true)
-        fun releaseGate() { if (ownsGate.compareAndSet(true, false)) TaskSubmissionGate.creating.set(false) }
-        fun finish(success: Boolean, message: String) {
-            releaseGate()
+        fun finish(accepted: Boolean) {
             synchronized(pending) { pending.remove(token) }
             app.getSystemService(NotificationManager::class.java).cancel(token, 1)
-            main.post { complete(success, message) }
-        }
-        fun valid() = runCatching { SystemClock.elapsedRealtime() < request.expiresAt &&
-            request.connection == AutomaticTaskNotice.connectionStamp(app) && !AutomaticUnlockSession.active &&
-            AutomaticTaskNotice.localBlockReason(app, true) == null && sourceValid(app, request.source) }.getOrDefault(false)
-        fun dispatch(expectedGeneration: Long) {
-            try {
-                check(valid() && TaskControl.isCurrent(expectedGeneration)) { "设备或自动任务已变化，请重新确认" }
-                val cleared = synchronized(gateway.prefs) {
-                    val active = gateway.prefs.getString("active_run", "").orEmpty()
-                    if (active.isNotBlank() && active != request.expectedRunId) false else {
-                        val edit = gateway.prefs.edit().remove("active_run")
-                        if (gateway.prefs.getString("voice_pending_worker_run", "") == request.expectedRunId)
-                            edit.remove("voice_pending_worker_run").remove("voice_pending_worker_generation")
-                        edit.commit()
-                    }
-                }
-                check(cleared && valid()) { "当前任务已变化，未执行自动任务" }
-                // Each real launcher reacquires its own gate and rechecks that no new task won this gap.
-                releaseGate()
-                val accepted = if (request.source.getString("kind") == "schedule") {
-                    ScheduleManager.get(app).continueConflict(request.source.getString("id"), request.source.getString("version"))
-                } else AutoTriggerTaskLauncher.launch(app, request.source.getString("goal"), sourceLabel = request.source.optString("label"),
-                    sourceRuleId = request.source.optString("rule_id"), sourceRuleVersion = request.source.optString("rule_version"), immediate = true)
-                // Dispatchers own any gate they acquire after this point; do not clear theirs in finish().
-                synchronized(pending) { pending.remove(token) }
-                app.getSystemService(NotificationManager::class.java).cancel(token, 1)
-                main.post { complete(accepted, if (accepted) "正在尝试启动自动任务" else "设备状态已变化，自动任务未启动") }
-            } catch (error: Exception) { finish(false, error.message ?: "当前任务未确认结束，自动任务未启动") }
+            main.post { complete(accepted, if (accepted) "自动任务将按队列顺序执行" else "提醒已失效，请在自动任务设置中查看") }
         }
         io.execute {
             try {
-                check(valid() && TaskControl.isCurrent(ticket)) { "提醒已过期，或设备、规则已变化" }
-                val active = gateway.prefs.getString("active_run", "").orEmpty()
-                check(active.isBlank() || active == request.expectedRunId) { "当前已是另一项任务，未中断它" }
-                val run = gateway.request("GET", "/runs/${request.expectedRunId}")
-                check(run.optString("id") == request.expectedRunId) { "任务状态与提醒不匹配" }
-                check(valid() && TaskControl.isCurrent(ticket)) { "设备状态已变化，未执行自动任务" }
-                if (TaskPresentation.terminal(run.optString("status"))) dispatch(ticket)
-                else {
-                    check(active == request.expectedRunId) { "无法确认当前任务，自动任务未启动" }
-                    main.post {
-                        if (!valid() || !TaskControl.isCurrent(ticket) || gateway.prefs.getString("active_run", "") != request.expectedRunId) {
-                            finish(false, "当前任务已变化，未中断它"); return@post
-                        }
-                        TaskControl.request(app, request.expectedRunId, "cancel") { cancelled, error ->
-                            if (cancelled == null || cancelled.optString("id") != request.expectedRunId || !TaskPresentation.terminal(cancelled.optString("status")))
-                                finish(false, error ?: "当前任务未确认结束，自动任务未启动")
-                            else {
-                                // Completion of the old run is independent of whether its replacement is still valid.
-                                synchronized(gateway.prefs) {
-                                    if (request.connection == AutomaticTaskNotice.connectionStamp(app) &&
-                                        gateway.prefs.getString("active_run", "") == request.expectedRunId) {
-                                        DeviceWorkerService.instance?.acceptEndedRun(cancelled)
-                                        val edit = gateway.prefs.edit()
-                                        if (gateway.prefs.getString("active_run", "") == request.expectedRunId) edit.remove("active_run")
-                                        if (gateway.prefs.getString("voice_pending_worker_run", "") == request.expectedRunId)
-                                            edit.remove("voice_pending_worker_run").remove("voice_pending_worker_generation")
-                                        edit.commit()
-                                        PauseDetails.clear(app, request.expectedRunId)
-                                    }
-                                }
-                                val afterCancel = TaskControl.currentGeneration()
-                                io.execute { dispatch(afterCancel) }
-                            }
-                        }
-                    }
-                }
-            } catch (error: Exception) { finish(false, error.message ?: "暂时无法确认任务状态") }
+                if (SystemClock.elapsedRealtime() >= request.expiresAt || request.connection != AutomaticTaskNotice.connectionStamp(app) ||
+                    !sourceValid(app, request.source)) { finish(false); return@execute }
+                if (request.source.getString("kind") == "schedule") {
+                    finish(ScheduleManager.get(app).continueConflict(request.source.getString("id"), request.source.getString("version")))
+                } else AutoTriggerTaskLauncher.launch(app, request.source.getString("goal"), onAdmission = ::finish,
+                    sourceLabel = request.source.optString("label"), sourceRuleId = request.source.optString("rule_id"),
+                    sourceRuleVersion = request.source.optString("rule_version"))
+            } catch (_: Exception) { finish(false) }
         }
     }
 
@@ -205,7 +136,7 @@ internal object AutomaticTaskConflict {
     }
 }
 
-/** Internal notification action. System lock must be dismissed by its owner before changing active work. */
+/** Compatibility action only admits work; it never changes the currently executing task. */
 class AutomaticTaskConflictActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

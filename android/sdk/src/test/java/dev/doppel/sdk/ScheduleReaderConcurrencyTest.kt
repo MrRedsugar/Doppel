@@ -20,7 +20,7 @@ class ScheduleReaderConcurrencyTest {
         now = 101000L
         val threads = Executors.newFixedThreadPool(2)
         try {
-            for ((operation, expectedStatus) in listOf("create" to "dispatching", "status" to "started")) {
+            for ((operation, expectedStatus) in listOf("create" to "dispatching", "status" to "queued")) {
                 val entered = CountDownLatch(1)
                 val release = CountDownLatch(1)
                 val port = object : SchedulePort {
@@ -41,7 +41,7 @@ class ScheduleReaderConcurrencyTest {
                         val item = engine.get(id)
                         assertEquals(expectedStatus, item.getJSONArray("history").getJSONObject(0).getString("status"))
                         assertFalse(item.getBoolean("enabled"))
-                        assertEquals(201000L, engine.nextDue())
+                        assertEquals(if (operation == "create") 101000L else 201000L, engine.nextDue())
                         val listing = engine.list().getJSONArray("items")
                         assertEquals(2, listing.length())
                         val listed = (0 until listing.length()).map { listing.getJSONObject(it) }.single { it.getString("id") == id }
@@ -55,7 +55,7 @@ class ScheduleReaderConcurrencyTest {
                         assertEquals(2, engine.list().getJSONArray("items").length())
                     }.get(2, TimeUnit.SECONDS)
                 } finally { release.countDown(); writer.get(2, TimeUnit.SECONDS) }
-                assertEquals(if (operation == "create") "started" else "completed",
+                assertEquals(if (operation == "create") "queued" else "completed",
                     engine.get(id).getJSONArray("history").getJSONObject(0).getString("status"))
             }
         } finally { threads.shutdownNow(); assertTrue(threads.awaitTermination(2, TimeUnit.SECONDS)) }

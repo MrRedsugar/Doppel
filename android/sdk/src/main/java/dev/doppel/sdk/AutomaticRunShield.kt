@@ -37,6 +37,8 @@ internal object AutomaticRunShield {
     private var root: FrameLayout? = null
     private var runPanel: View? = null
     private var message: TextView? = null
+    private var handoffHint: TextView? = null
+    private var takeoverButton: View? = null
     private var taskProgress: TaskProgressView? = null
     private var params: WindowManager.LayoutParams? = null
     private var holding: View? = null
@@ -84,7 +86,7 @@ internal object AutomaticRunShield {
         panel.addView(UiTheme.text(service, "自动任务", 12f, UiTheme.muted, true))
         message = UiTheme.text(service, "正在自动执行", 16f, UiTheme.ink, true).also { panel.addView(it) }
         taskProgress = TaskProgressView(service, true).also { panel.addView(it, LinearLayout.LayoutParams(-1, -2).apply { topMargin = UiTheme.dp(service, 4); bottomMargin = UiTheme.dp(service, 4) }) }
-        panel.addView(UiTheme.text(service, "长按接管或停止 3 秒，再输入已设置的锁屏密码进行本机验证。", 12f, UiTheme.muted))
+        handoffHint = UiTheme.text(service, "长按接管或停止 3 秒，再输入已设置的锁屏密码进行本机验证。", 12f, UiTheme.muted).also { panel.addView(it) }
         holdMessage = UiTheme.text(service, "", 12f, UiTheme.muted).also { it.visibility = View.GONE; panel.addView(it) }
         holdProgress = ProgressBar(service, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = 3000; visibility = View.GONE
@@ -94,6 +96,7 @@ internal object AutomaticRunShield {
             val button = UiTheme.command(service, label) {}.apply {
                 contentDescription = "$label，长按 3 秒后进行本机密码验证"
             }
+            if (action == "pause") takeoverButton = button
             button.setOnTouchListener { view, event ->
                 when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
@@ -146,7 +149,15 @@ internal object AutomaticRunShield {
             else view.setPadding(0, 0, 0, 0)
             insets
         }
-        return try { manager!!.addView(screen, layout); true } catch (_: Exception) { hide(); false }
+        return try { TemporaryScreenshotExclusion.addView(manager!!, screen, layout); true } catch (_: Exception) { hide(); false }
+    }
+
+    fun setLanHandoffAvailable(available: Boolean) {
+        val hint = if (available) "已确认附近电脑 · 长按接管 3 秒可免密码；停止仍需密码。"
+            else "长按接管或停止 3 秒，再输入已设置的锁屏密码进行本机验证。"
+        if (handoffHint?.text != hint) handoffHint?.text = hint
+        takeoverButton?.contentDescription = if (available) "接管，长按 3 秒；附近电脑确认有效时免密码"
+            else "接管，长按 3 秒后进行本机密码验证"
     }
 
     /** App-local verification. The same touch shield stays attached, including after Home. */
@@ -281,6 +292,7 @@ internal object AutomaticRunShield {
             layout.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
         else layout.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) or WindowManager.LayoutParams.FLAG_SECURE
         layout.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+        layout.alpha = 1f
         return try {
             manager!!.updateViewLayout(screen, layout)
             screen.requestApplyInsets()
@@ -314,6 +326,7 @@ internal object AutomaticRunShield {
         screen.context.getSystemService(InputMethodManager::class.java)?.hideSoftInputFromWindow(screen.windowToken, 0)
         layout.flags = (layout.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) and WindowManager.LayoutParams.FLAG_SECURE.inv()
         layout.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED
+        layout.alpha = 1f
         return try {
             manager!!.updateViewLayout(screen, layout)
             authenticationPanel?.let(screen::removeView)
@@ -388,7 +401,7 @@ internal object AutomaticRunShield {
         root?.let { screen -> screen.context.getSystemService(InputMethodManager::class.java)?.hideSoftInputFromWindow(screen.windowToken, 0) }
         root?.let { runCatching { manager?.removeViewImmediate(it) } }
         root = null; runPanel = null; params = null; manager = null; message = null; passing = false
-        holdProgress = null; holdMessage = null; taskProgress = null
+        holdProgress = null; holdMessage = null; taskProgress = null; handoffHint = null; takeoverButton = null
         authenticationPanel = null; authenticationInput = null; authenticationMessage = null; authenticationCountdown = null
         authenticationActivity = null; authenticationCancel = null
     }

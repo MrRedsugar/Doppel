@@ -8,6 +8,18 @@ import java.io.File
 import java.nio.file.Files
 
 class ModelUsageLedgerTest {
+    @Test fun initialUsageImportUsesCommittedAtomicBackup() {
+        val root = Files.createTempDirectory("usage-atomic-backup").toFile()
+        try {
+            File(root, "direct-runs-v1.json").writeText("interrupted replacement")
+            File(root, "direct-runs-v1.json.bak").writeText(JSONArray().put(JSONObject()
+                .put("prompt_tokens", 123).put("completion_tokens", 9).put("calls", 2)).toString())
+            val snapshot = ModelUsageLedger(root).snapshot()
+            assertEquals(123L, snapshot.getLong("lifetime_input_tokens"))
+            assertEquals(9L, snapshot.getLong("lifetime_output_tokens"))
+            assertEquals(2L, snapshot.getLong("lifetime_requests"))
+        } finally { root.deleteRecursively() }
+    }
     @Test fun importsOnlyKnownHistoryOnceThenTracksEveryResponseIndependentlyOfTaskRetention() {
         val root = Files.createTempDirectory("model-usage-test").toFile()
         try {

@@ -38,7 +38,7 @@ class ModelSettingsRefreshDeviceTest {
         assertNull("Run when the worker is stopped", DeviceWorkerService.instance)
         assertFalse(context.getSystemService(KeyguardManager::class.java).isDeviceLocked)
         val runs = File(context.noBackupFilesDir, "direct-runs-v1.json")
-        val recorded = if (runs.exists()) JSONArray(runs.readText()) else JSONArray()
+        val recorded = if (runs.exists()) dev.doppel.sdk.SplitTaskEngine.readPersistedRuns(runs.readText()) else JSONArray()
         repeat(recorded.length()) { assertTrue("Preserve unfinished tasks; this setting-edit test requires no unfinished task", recorded.getJSONObject(it).optString("status") in setOf("completed", "failed", "cancelled")) }
         val originalRouting = providers.routing()
         val originalProviders = providers.list()

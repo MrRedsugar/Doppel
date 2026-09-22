@@ -13,7 +13,7 @@ from .model_context import compact_screen_history
 from .runtime import TERMINAL
 from .providers import PROVIDERS, adapt_payload, connection_for, has_media, usage_details
 
-TOOL_NAMES = {"observe", "act", "login_phone", "login_code", "ask_user", "list_apps", "describe_screen", "list_skills", "read_skill", "read_skill_resource", "list_documents", "inspect_document", "transform_document", "read_memory", "save_memory", "list_extensions", "call_extension", "finish_task"}
+TOOL_NAMES = {"observe", "act", "login_phone", "login_code", "ask_user", "list_apps", "describe_screen", "list_documents", "inspect_document", "transform_document", "read_memory", "save_memory", "list_extensions", "call_extension", "finish_task"}
 
 
 def estimate_input(payload):
@@ -157,6 +157,8 @@ async def _call_model(runtime, run_id, body, *, auxiliary=False, allow_terminal=
     row = runtime._row(run_id)
     owner = row["owner"]
     run = Run.model_validate_json(row["payload"])
+    if run.status == "queued":
+        raise HTTPException(409, "Queued tasks cannot call the model")
     for tool in body.get("tools", []):
         name = tool.get("function", {}).get("name", "")
         if name not in {f"mcp__android__{name}" for name in TOOL_NAMES}:

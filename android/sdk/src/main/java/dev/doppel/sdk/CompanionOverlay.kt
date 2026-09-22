@@ -158,7 +158,7 @@ class CompanionOverlay(private val context: Context, private val pause: () -> Un
         params.x = if (rightEdge) maxX() else 0
         params.y = params.y.coerceIn(dp(32), maxY())
         updateDockShape()
-        try { manager.addView(root, params); attached = true } catch (_: Exception) { attached = false }
+        try { TemporaryScreenshotExclusion.addView(manager, root, params); attached = true } catch (_: Exception) { attached = false }
     }
 
     fun display(run: JSONObject?, workerState: String) {
@@ -270,7 +270,7 @@ class CompanionOverlay(private val context: Context, private val pause: () -> Un
                         layoutInDisplayCutoutMode=WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
                     }
                 }
-                windowManager.addView(view,layout);edgeWindows.add(view)
+                TemporaryScreenshotExclusion.addView(windowManager,view,layout);edgeWindows.add(view)
             }
             edge=edgeWindows.firstOrNull();handler.removeCallbacks(edgeTick);handler.post(edgeTick)
         } catch (_:Exception) {updateEdge(false)}
@@ -356,7 +356,10 @@ class CompanionOverlay(private val context: Context, private val pause: () -> Un
             if (!updateLayout()) {diagnostic.finish("layout_failed");release(owner);gate.reject();return@post}
             diagnostic.mark("layout_applied")
             // Covers interruption before the caller can enter its finally block.
-            handler.postDelayed({ release(owner) }, durationMs.coerceIn(3000, 6000))
+            handler.postDelayed({
+                val restore = { handler.post { release(owner) }; Unit }
+                DoppelAccessibilityService.instance?.afterGesturesStopped(restore) ?: restore()
+            }, durationMs.coerceIn(3000, 60000))
             // No attached input surface requires a traversal acknowledgement.
             if(traversal.get()==null) {diagnostic.mark("window_absent");acknowledge()}
             // The 80 ms compositor allowance after acknowledgement is paid by the

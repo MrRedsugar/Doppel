@@ -91,15 +91,20 @@ class ScreenshotArchiveTest {
         }
     }
 
-    @Test fun interruptedAndUnpairedFilesAreRemovedBeforeSavingWithinTheQuota() {
+    @Test fun interruptedAndUnpairedFilesAreRemovedWithinTheQuotaWithOneArchiveScan() {
         val dir = temp.newFolder()
+        var scans = 0
+        val countedRoot = object : File(dir.path) {
+            override fun listFiles(): Array<File>? { scans++; return super.listFiles() }
+        }
         val folder = File(dir, run).apply { mkdirs() }
         val orphan = File(folder, "orphan.png").apply { writeBytes(ByteArray(3000)) }
         val partial = File(folder, "capture-interrupted.part").apply { writeBytes(ByteArray(3000)) }
         val metadataOnly = File(folder, "metadata-only.json").apply { writeText("{}") }
         val marker = File(folder, "notes.txt").apply { writeText("retain") }
-        val archive = ScreenshotArchive(dir, maxBytes = 1024)
+        val archive = ScreenshotArchive(countedRoot, maxBytes = 1024)
         val item = archive.save(run, "command-1", png, JSONObject())
+        assertEquals(1, scans)
         assertFalse(orphan.exists()); assertFalse(partial.exists()); assertFalse(metadataOnly.exists())
         assertTrue(ownedBytes(dir) <= 1024)
         assertArrayEquals(png, archive.read(run, item.getString("id")))
@@ -158,6 +163,45 @@ class ScreenshotArchiveTest {
         time++
         archive.prune(7)
         assertEquals(0, archive.list(run).getJSONArray("items").length())
+    }
+
+    @Test fun saveAppliesRetentionAndValidRunsTogetherIncludingDuplicateCommands() {
+        var time = 1_000_000_000L
+        val archive = ScreenshotArchive(temp.newFolder(), { time })
+        archive.save("run-deleted", "command-deleted", png, JSONObject())
+        archive.save(run, "command-old", png, JSONObject())
+        time++
+        val boundary = archive.save(run, "command-current", png, JSONObject())
+        time += 7 * 86400000L
+        val duplicate = archive.save(run, "command-current", png, JSONObject(), 7, setOf(run))
+        assertEquals(boundary.toString(), duplicate.toString())
+        assertEquals(0, archive.list("run-deleted").getJSONArray("items").length())
+        assertEquals(1, archive.list(run).getJSONArray("items").length())
+        assertArrayEquals(png, archive.read(run, boundary.getString("id")))
+        time++
+        val renewed = archive.save(run, "command-current", png, JSONObject(), 7, setOf(run))
+        assertEquals(time, renewed.getLong("created_at"))
+        assertEquals(1, archive.list(run).getJSONArray("items").length())
+        assertThrows(IllegalArgumentException::class.java) {
+            archive.save("run-deleted", "command-new", png, JSONObject(), 7, setOf(run))
+        }
+        assertArrayEquals(png, archive.read(run, renewed.getString("id")))
+    }
+
+    @Test fun failedMetadataWriteKeepsPreviousEvidenceAndNextSaveCanRecover() {
+        val dir = temp.newFolder()
+        val archive = ScreenshotArchive(dir)
+        val previous = archive.save(run, "command-1", png, JSONObject())
+        val id = java.security.MessageDigest.getInstance("SHA-256").digest("command-2".toByteArray())
+            .joinToString("") { "%02x".format(it) }.take(32)
+        val blocked = File(File(dir, run), "$id.json").apply { mkdir() }
+        assertThrows(Exception::class.java) { archive.save(run, "command-2", png, JSONObject()) }
+        assertFalse(File(File(dir, run), "$id.png").exists())
+        assertArrayEquals(png, archive.read(run, previous.getString("id")))
+        assertTrue(blocked.delete())
+        val recovered = archive.save(run, "command-2", png, JSONObject())
+        assertArrayEquals(png, archive.read(run, recovered.getString("id")))
+        assertEquals(2, archive.list(run).getJSONArray("items").length())
     }
 
     private fun ownedBytes(dir: File) = dir.walkTopDown().filter { it.isFile && it.extension in setOf("png", "json", "part") }.sumOf { it.length() }

@@ -41,12 +41,16 @@ internal object TaskPresentation {
 
     fun detail(run: JSONObject, locallyPaused: Boolean): String {
         val state = run.optString("status")
+        if (state == "queued") return queueLabel(run) + "，前面的任务结束后自动执行"
         PausePresentation.from(run)?.let { return it.detail }
         if (state == "running" && locallyPaused) return "本机执行已停止，但未收到具体原因。\n\n下一步：核对当前屏幕和任务记录后选择继续或结束任务。"
         return message(run.optString("message")).ifBlank {
             when (state) { "running" -> "正在处理任务"; "queued" -> "等待开始执行"; "paused" -> "任务已保留，点击继续执行"; else -> title(state) }
         }
     }
+
+    fun queueLabel(run: JSONObject): String = run.optInt("queue_position").takeIf { it > 0 }
+        ?.let { "排队第 $it 位" } ?: "排队中"
 
     fun process(events: JSONArray?, currentMessage: String = ""): List<String> {
         if (events == null) return emptyList()

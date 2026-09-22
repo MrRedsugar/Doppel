@@ -16,21 +16,21 @@ class CredentialTaskProtocolTest {
                 .put("visual_frame", JSONObject().put("display_width", 1440).put("display_height", 3200).put("rotation", 0))))
     }
 
-    private fun request() = JSONObject().put("kind", "execute").put("action", "login_password")
+    private fun request(kind: String = "login_password") = JSONObject().put("kind", "execute").put("action", kind)
         .put("target", "已获得焦点的登录密码框").put("expected", "密码框显示已填入")
         .put("package_name", "dev.fixture.login").put("credential_label", "Fixture account")
 
-    @Test fun bothVisualModesDispatchPasswordLocallyAndContinueTheNormalObservationLoop() {
-        for (enhanced in listOf(false, true)) {
+    @Test fun bothVisualModesDispatchVaultFieldsLocallyAndContinueTheNormalObservationLoop() {
+        for (enhanced in listOf(false, true)) for (kind in listOf("login_username", "login_password")) {
             val engine = SplitTaskEngine(null, {}, { 1000L }, enhancementEnabled = { enhanced })
             val id = engine.create(JSONObject().put("device_id", "direct-this-phone").put("goal", "登录已有账号").put("mode", "assist")).getString("id")
             screen(engine)
             val work = engine.takeWork()!!
             assertFalse(work.grounding)
             assertTrue(work.payload.toString().contains("Fixture account"))
-            engine.accept(work, SplitTestReply.response(request()))
+            engine.accept(work, SplitTestReply.response(request(kind)))
             val command = engine.poll().getJSONObject("command")
-            assertEquals("login_password", command.getString("kind"))
+            assertEquals(kind, command.getString("kind"))
             assertEquals("login-screen", command.getString("screen_id"))
             assertEquals("dev.fixture.login", command.getString("package_name"))
             assertEquals("Fixture account", command.getString("credential_label"))
@@ -57,8 +57,8 @@ class CredentialTaskProtocolTest {
         screen(engine)
         engine.accept(engine.takeWork()!!, SplitTestReply.response(request()))
         assertEquals("login_password", engine.poll().getJSONObject("command").getString("kind"))
-        for (direct in listOf(false, true)) {
-            val body = request().apply { put("kind", "login_password"); remove("action"); put("screen_context", ""); put("text", "must-not-be-carried") }
+        for (direct in listOf(false, true)) for (kind in listOf("login_username", "login_password")) {
+            val body = request(kind).apply { put("kind", kind); remove("action"); put("screen_context", ""); put("text", "must-not-be-carried") }
             assertThrows(SplitSchemaViolation::class.java) {
                 SplitOutputSchema.validate(JSONObject().put("decision", body).put("state", JSONObject.NULL), SplitOutputSchema.format("primary", direct))
             }

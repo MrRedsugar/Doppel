@@ -137,7 +137,7 @@ class AutomaticTaskDispatchDeviceTest {
         assertTrue(DirectMode.available(context))
         val runsFile = File(context.noBackupFilesDir, "direct-runs-v1.json")
         val beforeRuns = runsFile.takeIf { it.exists() }?.readBytes()
-        val runs = JSONArray(beforeRuns?.toString(Charsets.UTF_8) ?: "[]")
+        val runs = dev.doppel.sdk.SplitTaskEngine.readPersistedRuns(beforeRuns?.toString(Charsets.UTF_8) ?: "[]")
         repeat(runs.length()) { assertTrue("Leave unfinished task records alone",
             runs.getJSONObject(it).getString("status") in setOf("completed", "failed", "cancelled")) }
         val runtime = DirectRuntime.get(context)

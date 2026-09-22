@@ -74,16 +74,6 @@ class ManualSettingsUiTest {
         return requireNotNull(value) { "Editable field: $hint" }
     }
     private fun set(view: EditText, text: String) { show(view); inst.runOnMainSync { view.setText(text) }; inst.waitForIdleSync() }
-    private fun stepFields(): List<EditText> {
-        var value = emptyList<EditText>()
-        inst.runOnMainSync { value = activity?.window?.decorView?.let(::views)?.filterIsInstance<EditText>()?.filter { it.hint?.toString() == "操作与目标" }.orEmpty() }
-        return value
-    }
-    private fun expectedFields(): List<EditText> {
-        var value = emptyList<EditText>()
-        inst.runOnMainSync { value = activity?.window?.decorView?.let(::views)?.filterIsInstance<EditText>()?.filter { it.hint?.toString() == "如何核验结果" }.orEmpty() }
-        return value
-    }
     private fun open(type: Class<out Activity>) {
         activity?.let { old -> inst.runOnMainSync { old.finish() } }
         activity = inst.startActivitySync(Intent(context, type).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -151,66 +141,6 @@ class ManualSettingsUiTest {
             result.put("ok", true).put("primary_model", before.primary.model).put("independent_visual", before.enhancementEnabled)
                 .put("screenshot_protected", true).put("settings_unchanged", true)
         } finally { report("model-settings", result); close() }
-    }
-
-    @Test fun actualTextProcessUsesRealModelThenEditsAddsRemovesSavesAndDisablesSkill() {
-        assumeTrue(args.getString("manual_ui") == "true" && args.getString("manual_ui_models") == "true")
-        noActiveTask()
-        val learning = AppLearning(context)
-        assertNull("Preserve the user's unfinished demonstration", learning.pendingEvidence())
-        val before = learning.manual.list().getJSONArray("items")
-        val beforeNames = (0 until before.length()).map { before.getJSONObject(it).getString("name") }.toSet()
-        val uniqueTitle = "UI验收-${UUID.randomUUID().toString().take(8)}"
-        val goal = "$uniqueTitle：查看系统设置首页，不更改选项"
-        val result = JSONObject().put("ok", false).put("uses_real_model_path", true)
-        var savedName: String? = null
-        try {
-            open(LearningActivity::class.java)
-            click("用文字描述操作过程")
-            set(field("例如：在设置中开启深色模式"), goal)
-            set(field("描述前提、操作步骤、看到的结果"), "在桌面找到系统设置入口并打开，查看首页标题和搜索框是否出现；看到设置首页后结束，不修改任何开关。这是用户提供的操作流程，尚未实际复测。")
-            shot("learning-text-process")
-            click("生成 Skill 草稿")
-            await("Real primary model must return a reviewable draft", 180000) { mainText("预览并编辑 Skill") != null }
-            val pending = requireNotNull(learning.pendingEvidence())
-            assertTrue("Draft must come from the real generation handler", pending.has("generated_draft"))
-            result.put("real_model_draft_received", true).put("model", ModelProviders(context).routing().primary.model)
-            shot("learning-real-model-draft")
-            set(field("标题"), uniqueTitle)
-            if (stepFields().size == 24) click("删除第 24 步")
-            val initial = stepFields().size
-            click("添加步骤")
-            assertEquals(initial + 1, stepFields().size)
-            click("删除第 ${initial + 1} 步"); assertEquals(initial, stepFields().size)
-            click("添加步骤"); assertEquals(initial + 1, stepFields().size)
-            set(stepFields().last(), "查看当前设置首页的标题和搜索入口，确认仍停留在设置首页")
-            set(expectedFields().last(), "系统设置首页可见，没有修改任何开关")
-            shot("learning-edited-steps")
-            click("保存 Skill")
-            await("User-reviewed Skill persisted") {
-                val items = learning.manual.list().getJSONArray("items")
-                savedName = (0 until items.length()).map { items.getJSONObject(it) }.firstOrNull { it.getString("title") == uniqueTitle && it.getString("name") !in beforeNames }?.getString("name")
-                savedName != null
-            }
-            val item = learning.manual.read(savedName!!)
-            assertEquals(initial + 1, item.getJSONObject("draft").getJSONArray("steps").length())
-            assertNull(learning.pendingEvidence())
-            assertTrue("User-added instructions need truthful user provenance", item.getJSONObject("evidence").getJSONArray("events").toString().contains("user_added_step"))
-            File(folder, "manual-skill.zip").writeBytes(learning.manual.export(savedName!!))
-            click(uniqueTitle); click("停用")
-            assertFalse(learning.manual.read(savedName!!).optBoolean("found"))
-            val catalogue = DirectSkills(context).list().getJSONArray("items")
-            assertFalse((0 until catalogue.length()).any { catalogue.getJSONObject(it).optString("name") == savedName })
-            shot("learning-skill-disabled")
-            result.put("ok", true).put("saved_skill", savedName).put("steps_after_edit", initial + 1).put("disabled_excluded_from_model", true)
-        } catch (error: Throwable) {
-            result.put("failure_type", error.javaClass.simpleName); runCatching { shot("learning-failure") }; throw error
-        } finally {
-            val own = learning.manual.list().getJSONArray("items")
-            repeat(own.length()) { i -> val item = own.getJSONObject(i); if (item.getString("title") == uniqueTitle && item.getString("name") !in beforeNames) learning.manual.delete(item.getString("name")) }
-            if (learning.pendingEvidence()?.optString("user_reported_goal") == goal) learning.clearPendingEvidence()
-            report("learning-real-model", result); close()
-        }
     }
 
     @Test fun actualScheduleEditorPersistsAndOffersChoiceWhilePhoneIsInUse() {

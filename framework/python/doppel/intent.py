@@ -46,12 +46,20 @@ def prompt(messages: list[dict[str, Any]], *, max_items: int = 12) -> list[dict[
     not belong in routing and would needlessly consume tokens.
     """
     recent: list[dict[str, str]] = []
-    for item in messages[-max_items:]:
+    start = max(0, len(messages) - max_items)
+    latest_user = next((i for i in range(len(messages) - 1, start - 1, -1)
+                        if isinstance(messages[i], dict) and messages[i].get("role") == "user"
+                        and isinstance(messages[i].get("content"), str)), None)
+    for i in range(start, len(messages)):
+        item = messages[i]
         if not isinstance(item, dict) or item.get("role") not in {"user", "assistant"}:
             continue
         value = item.get("content", "")
         if isinstance(value, str) and value.strip():
-            recent.append({"role": str(item["role"]), "content": value.strip()[:2000]})
+            text = value.strip()
+            if i == latest_user and len(text) > 12000:
+                raise ValueError("消息长度无效")
+            recent.append({"role": str(item["role"]), "content": text if i == latest_user else text[:2000]})
     return [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": json.dumps({"messages": recent}, ensure_ascii=False)}]
 
@@ -94,4 +102,3 @@ def parse(raw: str | dict[str, Any]) -> IntentDecision:
 def should_dispatch(decision: IntentDecision, threshold: float = 0.72) -> bool:
     """Only high-confidence task decisions may create a device run."""
     return decision.intent == "task" and decision.confidence >= threshold and bool(decision.task_goal)
-

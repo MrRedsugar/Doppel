@@ -16,7 +16,7 @@ class SplitProtocolDiagnosticTest {
         fun response(value: JSONObject) = JSONObject().put("choices", JSONArray().put(JSONObject().put("finish_reason", "stop")
             .put("message", JSONObject().put("content", value.toString()))))
         val decision = JSONObject().put("kind", "tap").put("target", "private-target-value")
-            .put("expected", "private-expected-value").put("screen_context", "private-context-value")
+            .put("expected", "private-expected-value").put("screen_context", "private-context-value").put("request_login_code", JSONObject.NULL)
         val bad = JSONObject().put("decision", decision).put("state", JSONObject().put("phase", "private-phase-value"))
         engine.accept(engine.takeWork()!!, response(bad))
         val failedRun = engine.get(id)

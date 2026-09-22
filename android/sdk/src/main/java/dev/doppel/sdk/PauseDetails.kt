@@ -12,14 +12,18 @@ internal object PauseDetails {
     }.getOrNull()?.takeIf { id.isNotBlank() && it.optString("id") == id && it.optString("status") == "paused" }
     fun remember(context: Context, run: JSONObject) {
         if (run.optString("status") != "paused" || run.optString("id").isBlank()) return
-        val receipt = JSONObject().put("id", run.getString("id")).put("status", "paused")
-            .put("message", TaskPresentation.message(run.optString("message")).take(4000))
-            .put("updated_at", run.optLong("updated_at"))
-        run.optJSONObject("pending_request")?.optString("reason")?.takeIf {
-            it in setOf("verification", "payment", "login", "interruption")
-        }?.let { receipt.put("pending_request", JSONObject().put("reason", it)) }
-        prefs(context).edit().putString(KEY, receipt.toString()).apply()
+        prefs(context).edit().putString(KEY, receipt(run).toString()).apply()
     }
+    internal fun receipt(run: JSONObject): JSONObject = JSONObject().put("id", run.getString("id")).put("status", "paused")
+            .put("message", TaskPresentation.message(run.optString("message")).take(4000))
+            .put("updated_at", run.optLong("updated_at")).apply {
+                run.optJSONObject("pending_request")?.let { pending ->
+                    put("pending_request", JSONObject().apply {
+                        for (key in listOf("id", "kind", "manual_only", "message", "reason", "package_name"))
+                            if (pending.has(key)) put(key, pending.get(key))
+                    })
+                }
+            }
     fun clear(context: Context, id: String? = null) {
         val prefs = prefs(context)
         val saved = runCatching { JSONObject(prefs.getString(KEY, "{}").orEmpty()) }.getOrDefault(JSONObject())
@@ -35,9 +39,17 @@ internal object PauseDetails {
         val currentMessage = TaskPresentation.message(run.optString("message"))
         val replaceable = PausePresentation.generic(currentMessage) || PausePresentation.manual(currentMessage)
         if (!localStop && !(status == "paused" && replaceable)) return run
+        val currentRequest = run.optJSONObject("pending_request")?.optString("id").orEmpty()
+        val savedRequest = saved.optJSONObject("pending_request")?.optString("id").orEmpty()
+        if (currentRequest.isNotBlank() && savedRequest.isNotBlank() && currentRequest != savedRequest) return run
         return JSONObject(run.toString()).put("status", "paused").put("message", saved.optString("message"))
             .put("updated_at", saved.optLong("updated_at")).apply {
-                if (saved.has("pending_request")) put("pending_request", saved.getJSONObject("pending_request"))
+                saved.optJSONObject("pending_request")?.let { savedPending ->
+                    // Old local receipts contain only a reason; retain the runtime request identity.
+                    val pending = JSONObject(run.optJSONObject("pending_request")?.toString() ?: "{}")
+                    savedPending.keys().forEach { key -> pending.put(key, savedPending.get(key)) }
+                    put("pending_request", pending)
+                }
             }
     }
 }

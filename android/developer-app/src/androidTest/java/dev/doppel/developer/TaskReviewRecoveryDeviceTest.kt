@@ -2,16 +2,9 @@
 
 package dev.doppel.developer
 
-import android.app.Activity
-import android.app.UiAutomation
 import android.content.Context
 import android.content.ContextWrapper
-import android.content.Intent
-import android.os.SystemClock
-import android.view.accessibility.AccessibilityNodeInfo
 import androidx.test.platform.app.InstrumentationRegistry
-import dev.doppel.sdk.ClientActivity
-import dev.doppel.sdk.DeviceWorkerService
 import dev.doppel.sdk.FirstUseConsent
 import dev.doppel.sdk.Gateway
 import dev.doppel.sdk.TaskReviewStore
@@ -27,21 +20,11 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
-/** Loopback delivery faults, real SharedPreferences and visible review controls; no model or task. */
+/** Legacy review journal recovery and connection isolation; no UI, model or task. */
 class TaskReviewRecoveryDeviceTest {
     @get:Rule val terminalPointer: org.junit.rules.TestRule = TerminalTaskPointerTestRule()
     private val inst = InstrumentationRegistry.getInstrumentation()
     private val base get() = inst.targetContext
-    private fun <T> main(block: () -> T): T {
-        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) return block()
-        var value: T? = null; inst.runOnMainSync { value = block() }
-        @Suppress("UNCHECKED_CAST") return value as T
-    }
-    private fun await(label: String, predicate: () -> Boolean) {
-        val until = SystemClock.elapsedRealtime() + 10000
-        while (SystemClock.elapsedRealtime() < until) { if (predicate()) return; Thread.sleep(50) }
-        assertTrue(label, predicate())
-    }
     private fun isolated(block: (Context, Gateway, MemoryServer) -> Unit) {
         val prefix = "qa-review-${UUID.randomUUID()}-"
         val fixture = object : ContextWrapper(base) {
@@ -106,75 +89,27 @@ class TaskReviewRecoveryDeviceTest {
         assertEquals("broken-fixture", prefs.getString("items", ""))
     }
 
-    @Test fun actualReviewReopensWithFailureAndRetriesWithoutDuplicatingLocalOrRemoteMemory() = isolated { _, gateway, server ->
-        assertTrue(FirstUseConsent.isAccepted(base))
-        assertNull("Keep any active worker untouched", DeviceWorkerService.instance)
-        val journal = base.getSharedPreferences("doppel_task_reviews", 0)
-        val before = journal.getString("items", null)
-        assertTrue("Leave room for one fixture without evicting user corrections", JSONArray(before ?: "[]").length() < 50)
+    @Test fun legacyReviewJournalReopensAndRetriesWithoutDuplicatingLocalOrRemoteMemory() = isolated { context, gateway, server ->
         val runId = "qa-review-${UUID.randomUUID()}"
-        val run = JSONObject().put("id", runId).put("goal", "纠错失败恢复验收").put("status", "failed")
-            .put("message", "隔离的已结束记录，不创建或执行任务")
         val note = "先确认页面标题，再继续操作"
-        val store = TaskReviewStore(base)
-        var owner: Activity? = null
-        val ui = inst.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
-        val flags = ui.serviceInfo.flags
-        fun openReview() = main {
-            ClientActivity::class.java.getDeclaredMethod("openReview", JSONObject::class.java).apply { isAccessible = true }.invoke(owner, run)
-        }
-        fun matching(text: String, click: Boolean): Boolean {
-            fun visit(node: AccessibilityNodeInfo): Boolean {
-                if (node.isVisibleToUser && node.text?.toString() == text) {
-                    if (!click) return true
-                    var current: AccessibilityNodeInfo? = AccessibilityNodeInfo.obtain(node)
-                    while (current != null) {
-                        val old = current
-                        if (old.isClickable && old.performAction(AccessibilityNodeInfo.ACTION_CLICK)) { old.recycle(); return true }
-                        current = old.parent; old.recycle()
-                    }
-                }
-                for (i in 0 until node.childCount) node.getChild(i)?.let { child -> try { if (visit(child)) return true } finally { child.recycle() } }
-                return false
-            }
-            val windows = ui.windows
-            try { return windows.any { it.root?.let { root -> try { visit(root) } finally { root.recycle() } } == true } }
-            finally { windows.forEach { it.recycle() } }
-        }
-        fun click(text: String) = await("Missing control: $text") { matching(text, true) }
-        try {
-            ui.serviceInfo = ui.serviceInfo.apply { this.flags = this.flags or android.accessibilityservice.AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS }
-            owner = inst.startActivitySync(Intent(base, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            main { ClientActivity::class.java.getDeclaredField("gateway").apply { isAccessible = true }.set(owner, gateway) }
-            // Seed the result of a rejected save, then verify the real UI can recover it.
-            val id = store.add(runId, run.getString("goal"), note, "failed", gateway.reviewScope()).getString("id")
-            assertEquals("failed", store.submit(id, gateway).getString("sync_state"))
-            openReview()
-            await("Reopened dialog hid the failed memory write") { matching("加入记忆失败，可以重试", false) }
-            click("关闭"); openReview()
-            server.mode = "success"
-            click("重试加入记忆")
-            await("Retry did not visibly reach saved state") { matching("已加入记忆，下次规划会参考", false) }
-            assertEquals(2, server.posts.get())
-            assertEquals(1, store.forRun(runId).size)
-            click("关闭"); openReview()
-            await("Successful state was not durable on reopening") { matching("已加入记忆，下次规划会参考", false) }
-            assertFalse(matching("重试加入记忆", false))
-            assertEquals(2, server.posts.get())
-            click("关闭")
-        } finally {
-            main { owner?.finish() }
-            ui.serviceInfo = ui.serviceInfo.apply { this.flags = flags }
-            synchronized(journal) {
-                val existing = JSONArray(journal.getString("items", "[]"))
-                val kept = JSONArray((0 until existing.length()).map { existing.getJSONObject(it) }.filter { it.optString("run_id") != runId })
-                val previous = before?.let(::JSONArray) ?: JSONArray()
-                try {
-                    for (i in 0 until previous.length()) if (!previous.getJSONObject(i).has("sync_state")) kept.optJSONObject(i)?.remove("sync_state")
-                    assertEquals("Only the isolated fixture may change", previous.toString(), kept.toString())
-                } finally { check(journal.edit().apply { if (before == null) remove("items") else putString("items", before) }.commit()) }
-            }
-        }
+        val store = TaskReviewStore(context)
+        val id = store.add(runId, "纠错失败恢复验收", note, "failed", gateway.reviewScope()).getString("id")
+        assertEquals("failed", store.submit(id, gateway).getString("sync_state"))
+        val reopened = TaskReviewStore(context)
+        assertEquals("failed", reopened.forRun(runId, gateway.reviewScope()).single().getString("sync_state"))
+        assertEquals(note, reopened.get(id).getString("note"))
+        server.mode = "success"
+        val saved = reopened.submit(id, gateway)
+        assertEquals("saved", saved.getString("sync_state"))
+        assertEquals(2, server.posts.get())
+        val finalStore = TaskReviewStore(context)
+        assertEquals("saved", finalStore.forRun(runId, gateway.reviewScope()).single().getString("sync_state"))
+        assertEquals(saved.getString("memory_id"), finalStore.submit(id, gateway).getString("memory_id"))
+        val remote = gateway.captureReviewConnection().request("GET", "/memories").getJSONArray("items")
+        assertEquals(1, remote.length())
+        assertEquals(saved.getString("memory_id"), remote.getJSONObject(0).getString("id"))
+        assertTrue(remote.getJSONObject(0).getString("content").contains(note))
+        assertEquals("Reopening saved journal entries must not repeat a POST", 2, server.posts.get())
     }
 
     @Test fun connectionChangedAfterClaimStillSendsOnlyToCapturedOriginAndCredential() = isolated { context, gateway, original ->

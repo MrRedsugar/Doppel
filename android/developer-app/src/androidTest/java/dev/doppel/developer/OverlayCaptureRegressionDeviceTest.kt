@@ -1,3 +1,5 @@
+@file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+
 package dev.doppel.developer
 
 import android.app.KeyguardManager
@@ -187,7 +189,7 @@ class OverlayCaptureRegressionDeviceTest {
             assertTrue(context.getSystemService(PowerManager::class.java).isInteractive)
             assertFalse(context.getSystemService(KeyguardManager::class.java).isKeyguardLocked)
             originalTaskBytes?.let { bytes ->
-                val runs = JSONArray(String(bytes, Charsets.UTF_8))
+                val runs = dev.doppel.sdk.SplitTaskEngine.readPersistedRuns(String(bytes, Charsets.UTF_8))
                 repeat(runs.length()) { assertTrue("End unfinished tasks before testing UI components",
                     runs.getJSONObject(it).optString("status") in setOf("completed", "failed", "cancelled")) }
             }

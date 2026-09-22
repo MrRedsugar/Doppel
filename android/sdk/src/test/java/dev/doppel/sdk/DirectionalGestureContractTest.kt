@@ -6,6 +6,29 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class DirectionalGestureContractTest {
+    @Test fun startHoldIsStrictlyBoundedAndLimitedToObjectDragging() {
+        val drag = swipeIntent("unknown", "right").put("gesture_semantics", "object_drag")
+        assertEquals(0, DirectionalGestureContract.parsePlanner("swipe", drag).single().startHoldMs)
+        for (hold in listOf(0, 800, 3000)) {
+            val intent = DirectionalGestureContract.parsePlanner("swipe", drag.put("start_hold_ms", hold)).single()
+            assertEquals(hold, intent.startHoldMs)
+            assertEquals(hold, intent.toJson().getInt("start_hold_ms"))
+        }
+        for (invalid in listOf(-1, 3001, 1.5, "800", true, JSONObject.NULL)) {
+            assertThrows(IllegalArgumentException::class.java) { DirectionalGestureContract.parsePlanner("swipe", drag.put("start_hold_ms", invalid)) }
+        }
+        for (semantics in listOf("reveal_content", "physical_gesture")) {
+            assertThrows(IllegalArgumentException::class.java) {
+                DirectionalGestureContract.parsePlanner("swipe", swipeIntent().put("gesture_semantics", semantics).put("start_hold_ms", 800))
+            }
+        }
+        val planned = DirectionalGestureContract.parsePlanner("swipe", drag.put("start_hold_ms", 800))
+        val refined = DirectionalGestureContract.resolveAssessment("swipe", planned, JSONObject()
+            .put("target_relative_direction", "right").put("required_finger_direction", "right").put("direction_corrected", true))
+        assertTrue(refined.validation.consistent)
+        assertEquals(800, refined.effectiveIntents.single().startHoldMs)
+    }
+
     private fun swipeIntent(target: String = "left", finger: String = "right") = JSONObject()
         .put("gesture_semantics", "reveal_content")
         .put("target_relative_direction", target)

@@ -4,6 +4,24 @@ from fastapi.testclient import TestClient
 from doppel import DoppelRuntime, RuntimeConfig, create_router
 
 
+def test_task_title_validation_and_persistence(tmp_path):
+    runtime = DoppelRuntime(RuntimeConfig(data_dir=tmp_path, auto_start=False))
+    app = FastAPI()
+    app.include_router(create_router(runtime, lambda: "alice"))
+    with TestClient(app) as client:
+        device = client.post("/v1/devices", json={"installation_id": "titles", "name": "Phone"}).json()
+        body = {"device_id": device["id"], "goal": "Inspect app"}
+        for invalid in ({}, 123, "x" * 121):
+            assert client.post("/v1/runs", json={**body, "title": invalid}).status_code == 422
+            assert runtime.runs("alice") == []
+        for title, expected in (("  App\n review  ", "App review"), (None, "Inspect app"), ("   ", "Inspect app")):
+            response = client.post("/v1/runs", json={**body, "title": title})
+            assert response.status_code == 201
+            run = response.json()
+            assert client.get(f"/v1/runs/{run['id']}").json()["title"] == expected
+            assert client.post(f"/v1/runs/{run['id']}/cancel").status_code == 200
+
+
 def test_http_device_queue_requires_owner_and_returns_json_when_empty(tmp_path):
     runtime = DoppelRuntime(RuntimeConfig(data_dir=tmp_path, auto_start=False))
     app = FastAPI()
@@ -26,4 +44,3 @@ def test_http_device_queue_requires_owner_and_returns_json_when_empty(tmp_path):
         response = client.post(f"/v1/devices/{device['id']}/results", headers=headers, json={"command_id": command["id"], "run_id": run["id"], "status": "ok"})
         assert response.status_code == 200
         assert client.post(f"/v1/runs/{run['id']}/cancel", headers=headers).json()["status"] == "cancelled"
-

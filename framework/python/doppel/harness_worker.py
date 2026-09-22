@@ -35,12 +35,15 @@ def main():
       the resulting state. Use opaque node IDs and the screen_id returned by observe. Use
       list_apps to discover package names. If a needed icon is unlabeled, describe_screen can
       inspect it. Do not invent actions or claim success without observed evidence. The device's
-      delegated_payment status and host decisions determine ordinary payment eligibility. When
-      disabled, hand payment to the user. Never enable consent yourself. Payment credentials,
+      delegated_payment status and task permissions determine ordinary payment eligibility. Use
+      act(action="pay") only for the current action that actually submits payment; browsing orders,
+      payment history or checkout details uses tap. Judge the action from the current screen and
+      user goal, never from a matching word alone. Pay requires full access and enabled delegation.
+      Otherwise hand payment to the user. Never enable consent yourself. Payment credentials,
       transfers and persistent payment mandates remain manual. An accepted tap is not evidence
       of payment success; inspect the resulting screen. Ask only when context cannot resolve
-      a material ambiguity. Work efficiently with document batch tools and reusable skills when
-      applicable. You can inspect available skills and documents on demand. Reply in Chinese.
+      a material ambiguity. Work efficiently with document batch tools when applicable.
+      You can inspect available documents and long-term memory on demand. Reply in Chinese.
       Report task completion with finish_task and evidence_ids returned by successful tools;
       normal assistant text alone does not finish a device task.
       Include task_state in the first normal observe or act call; do not make a separate planning call.

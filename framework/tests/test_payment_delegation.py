@@ -72,25 +72,27 @@ def test_consent_schema_accepts_supported_device_id_and_legacy_disabled_observat
 @pytest.mark.parametrize("label", ["京东快付", "快付", "Paynow", "Pay now", "立即支付"])
 def test_disabled_payment_is_manual_and_cannot_be_enabled_by_mode(runtime, mode, label):
     device, run = begin(runtime, screen(label), mode)
-    command = runtime.queue_command(run.id, "tap", target="target", screen_id="checkout")
+    command = runtime.queue_command(run.id, "pay", target="target", screen_id="checkout")
     assert command.payment_consent_id is None
     assert runtime.command_result(command.id).status == "blocked"
     assert runtime.get_run("alice", run.id).pending_request["reason"] == "payment"
     assert runtime.next_command("alice", device.id) is None
 
 
-@pytest.mark.parametrize("mode,decision", [("ask", "approve"), ("assist", "approve"), ("full", "allow")])
+@pytest.mark.parametrize("mode,decision", [("ask", "manual"), ("assist", "manual"), ("full", "allow")])
 def test_enabled_payment_is_host_stamped_and_respects_operation_mode(runtime, mode, decision):
     device, run = begin(runtime, screen(consent=CONSENT), mode)
-    command = runtime.queue_command(run.id, "tap", target="target", screen_id="checkout")
-    assert command.payment_consent_id == CONSENT
-    assert runtime.command_result(command.id) is None
-    if decision == "approve":
-        assert runtime.get_run("alice", run.id).status == "awaiting_approval"
+    command = runtime.queue_command(run.id, "pay", target="target", screen_id="checkout")
+    assert command.mode == mode
+    if decision == "manual":
+        assert command.payment_consent_id is None
+        assert runtime.command_result(command.id).status == "blocked"
+        assert runtime.get_run("alice", run.id).pending_request["reason"] == "payment"
         assert runtime.next_command("alice", device.id) is None
-        runtime.answer("alice", run.id, command.id, approve=True)
-    delivered = runtime.next_command("alice", device.id)
-    assert delivered.id == command.id and delivered.payment_consent_id == CONSENT
+    else:
+        assert runtime.command_result(command.id) is None
+        delivered = runtime.next_command("alice", device.id)
+        assert delivered.id == command.id and delivered.payment_consent_id == CONSENT
 
 
 @pytest.mark.parametrize("supplied", [None, CONSENT, NEW_CONSENT, True])
@@ -101,7 +103,8 @@ def test_caller_cannot_supply_or_clear_host_only_consent_field(runtime, supplied
     assert runtime.next_command("alice", device.id) is None
 
 
-def test_internal_act_rejects_null_consent_field_before_filtering(runtime):
+@pytest.mark.parametrize("field", ["payment_consent_id", "mode"])
+def test_internal_act_rejects_null_host_field_before_filtering(runtime, field):
     device, run = begin(runtime, screen(consent=CONSENT))
     app = FastAPI()
     app.include_router(create_router(runtime, lambda: "alice"))
@@ -109,13 +112,13 @@ def test_internal_act_rejects_null_consent_field_before_filtering(runtime):
         response = client.post(f"/v1/internal/runs/{run.id}/tool",
                                headers={"Authorization": "Bearer " + runtime.run_tokens[run.id]},
                                json={"name": "act", "arguments": {"action": "tap", "target": "target",
-                                     "screen_id": "checkout", "payment_consent_id": None}})
+                                     "screen_id": "checkout", field: None}})
     assert response.status_code in {403, 422}
     assert "host" in response.json()["detail"].lower() or "device" in response.json()["detail"].lower()
     assert runtime.next_command("alice", device.id) is None
 
 
-@pytest.mark.parametrize("label", ["Browse menu", "Back", "Orders"])
+@pytest.mark.parametrize("label", ["Browse menu", "Back", "Orders", "待付款", "待付款右侧的全部订单"])
 def test_consent_does_not_stamp_unrelated_controls(runtime, label):
     device, run = begin(runtime, screen(label, CONSENT, heading="收银台"))
     command = runtime.queue_command(run.id, "tap", target="target", screen_id="checkout")
@@ -124,24 +127,10 @@ def test_consent_does_not_stamp_unrelated_controls(runtime, label):
 
 
 @pytest.mark.parametrize("label", ["", "确认", "Continue"])
-def test_ambiguous_checkout_control_gets_stamp_only_with_payment_context(runtime, label):
-    device, run = begin(runtime, screen(label, CONSENT, heading="应付总额"))
-    command = runtime.queue_command(run.id, "tap", target="target", screen_id="checkout")
-    assert runtime.next_command("alice", device.id).payment_consent_id == CONSENT
-
-
-@pytest.mark.parametrize("label", ["转账", "汇款", "Transfer", "Remittance", "支付密码", "付款验证码",
-                                  "Payment OTP", "开通免密支付", "设置自动扣款", "授权自动续费",
-                                  "免密支付立即开启", "自动扣款授权", "已开启免密，授权自动扣款",
-                                  "关闭自动续费", "取消自动扣款", "已成功开启免密支付，关闭自动续费",
-                                  "Enable autopay", "Enable automatic renewal", "Authorize auto-pay",
-                                  "Set up automatic payments", "Cancel automatic billing",
-                                  "Direct debit", "Standing order", "Recurring payment"])
-def test_restricted_financial_actions_remain_manual_with_consent(runtime, label):
+def test_declared_payment_gets_stamp_independent_of_button_text(runtime, label):
     device, run = begin(runtime, screen(label, CONSENT))
-    command = runtime.queue_command(run.id, "tap", target="target", screen_id="checkout")
-    assert runtime.command_result(command.id).status == "blocked"
-    assert runtime.next_command("alice", device.id) is None
+    command = runtime.queue_command(run.id, "pay", target="target", screen_id="checkout")
+    assert runtime.next_command("alice", device.id).payment_consent_id == CONSENT
 
 
 @pytest.mark.parametrize("label", ["免密支付 · 已开启", "已开通免密支付", "自动扣款已授权", "自动续费已设置",
@@ -149,7 +138,7 @@ def test_restricted_financial_actions_remain_manual_with_consent(runtime, label)
                                   "自动扣款已成功取消"])
 def test_existing_payment_mandate_status_does_not_block_ordinary_consented_payment(runtime, label):
     device, run = begin(runtime, screen(consent=CONSENT, heading=label))
-    command = runtime.queue_command(run.id, "tap", target="target", screen_id="checkout")
+    command = runtime.queue_command(run.id, "pay", target="target", screen_id="checkout")
     assert command.payment_consent_id == CONSENT
     assert runtime.next_command("alice", device.id).id == command.id
 
@@ -162,20 +151,11 @@ def test_manual_financial_context_allows_exit_controls_without_payment_consent(r
     assert runtime.next_command("alice", device.id).id == command.id
 
 
-@pytest.mark.parametrize("kind", ["tap", "type", "login_code"])
-def test_split_checkout_and_code_input_context_requires_manual_handoff(runtime, kind):
-    device, run = begin(runtime, screen("验证码", CONSENT, editable=True, heading="收银台"))
-    fields = {"text": "synthetic"} if kind == "type" else {"package_name": "test.shop"} if kind == "login_code" else {}
-    command = runtime.queue_command(run.id, kind, target="target", screen_id="checkout", **fields)
-    assert runtime.command_result(command.id).status == "blocked"
-    assert runtime.next_command("alice", device.id) is None
-
-
 def test_redacted_payment_password_target_uses_payment_resume_flow(runtime):
     observation = screen("", CONSENT, editable=True, heading="收银台")
     observation.nodes[0].password = True
     device, run = begin(runtime, observation)
-    command = runtime.queue_command(run.id, "tap", target="target", screen_id="checkout")
+    command = runtime.queue_command(run.id, "pay", target="target", screen_id="checkout")
     assert runtime.command_result(command.id).status == "blocked"
     assert runtime.next_command("alice", device.id) is None
     assert runtime.get_run("alice", run.id).pending_request["reason"] == "payment"
@@ -184,29 +164,10 @@ def test_redacted_payment_password_target_uses_payment_resume_flow(runtime):
     assert runtime.get_run("alice", run.id).requires_fresh_observation
 
 
-@pytest.mark.parametrize("kind", ["long_press", "type", "login_phone", "login_code"])
-def test_payment_consent_authorizes_only_tap(runtime, kind):
-    device, run = begin(runtime, screen("支付", CONSENT, editable=True))
-    fields = {"text": "synthetic"} if kind == "type" else {"package_name": "test.shop"} if kind.startswith("login_") else {}
-    command = runtime.queue_command(run.id, kind, target="target", screen_id="checkout", **fields)
-    assert runtime.command_result(command.id).status == "blocked"
-    assert runtime.next_command("alice", device.id) is None
-
-
-@pytest.mark.parametrize("new_consent,new_screen", [(None, "checkout"), (NEW_CONSENT, "checkout"), (CONSENT, "changed")])
-def test_approval_cannot_reuse_revoked_or_stale_payment_authority(runtime, new_consent, new_screen):
-    device, run = begin(runtime, screen(consent=CONSENT), "assist")
-    command = runtime.queue_command(run.id, "tap", target="target", screen_id="checkout")
-    replace_snapshot(runtime, run.id, screen(consent=new_consent, screen_id=new_screen))
-    with pytest.raises(Conflict):
-        runtime.answer("alice", run.id, command.id, approve=True)
-    assert runtime.next_command("alice", device.id) is None
-
-
 @pytest.mark.parametrize("new_consent", [None, NEW_CONSENT])
 def test_queued_payment_is_withheld_when_observed_consent_changes(runtime, new_consent):
     device, run = begin(runtime, screen(consent=CONSENT))
-    command = runtime.queue_command(run.id, "tap", target="target", screen_id="checkout")
+    command = runtime.queue_command(run.id, "pay", target="target", screen_id="checkout")
     replace_snapshot(runtime, run.id, screen(consent=new_consent))
     assert runtime.next_command("alice", device.id) is None
     assert runtime.command_result(command.id).status == "blocked"
@@ -216,6 +177,45 @@ def test_queued_payment_is_withheld_when_observed_consent_changes(runtime, new_c
 def test_stamped_command_cannot_be_reused_for_nonpayment_target():
     command = Command(id="c", run_id="r", kind="tap", target="target", screen_id="checkout", payment_consent_id=CONSENT)
     assert ActionPolicy().evaluate("full", command, screen("Browse menu", CONSENT)).decision != "allow"
+
+
+@pytest.mark.parametrize("supplied", [None, "full", "assist", True])
+def test_caller_cannot_supply_trusted_task_mode(runtime, supplied):
+    device, run = begin(runtime, screen(consent=CONSENT), "assist")
+    with pytest.raises(PermissionDenied, match="host"):
+        runtime.queue_command(run.id, "pay", target="target", screen_id="checkout", mode=supplied)
+    assert runtime.next_command("alice", device.id) is None
+
+
+@pytest.mark.parametrize("changed", ["screen", "mode", "target"])
+def test_queued_payment_revalidates_current_task_and_target(runtime, changed):
+    device, run = begin(runtime, screen(consent=CONSENT))
+    command = runtime.queue_command(run.id, "pay", target="target", screen_id="checkout")
+    if changed == "mode":
+        with runtime.store.transaction() as db:
+            current = runtime.get_run("alice", run.id)
+            current.mode = "assist"
+            runtime._update(db, current)
+    else:
+        observation = screen(consent=CONSENT, screen_id="changed" if changed == "screen" else "checkout")
+        if changed == "target":
+            observation.nodes[0].enabled = False
+        replace_snapshot(runtime, run.id, observation)
+    assert runtime.next_command("alice", device.id) is None
+    assert runtime.command_result(command.id).status == "blocked"
+
+
+def test_payment_dispatch_and_receipt_do_not_queue_another_action(runtime):
+    device, run = begin(runtime, screen(consent=CONSENT))
+    command = runtime.queue_command(run.id, "pay", target="target", screen_id="checkout")
+    assert runtime.next_command("alice", device.id).id == command.id
+    assert runtime.next_command("alice", device.id).id == command.id
+    result = CommandResult(command_id=command.id, run_id=run.id, status="ok", observation=screen(consent=CONSENT))
+    runtime.submit_result("alice", device.id, result)
+    runtime.submit_result("alice", device.id, result)
+    assert runtime.next_command("alice", device.id) is None
+    with pytest.raises(Conflict):
+        runtime.submit_result("alice", device.id, result.model_copy(update={"status": "error"}))
 
 
 def test_compact_model_observation_reports_setting_without_consent_generation():
@@ -231,7 +231,7 @@ def test_checkable_payment_never_returns_cached_success(runtime):
     observation.nodes[0].checkable = True
     observation.nodes[0].checked = True
     device, run = begin(runtime, observation)
-    command = runtime.queue_command(run.id, "tap", target="target", screen_id="checkout", desired_checked=True)
+    command = runtime.queue_command(run.id, "pay", target="target", screen_id="checkout", desired_checked=True)
     assert runtime.command_result(command.id) is None
     assert runtime.next_command("alice", device.id).payment_consent_id == CONSENT
     assert not any(event.kind == "evidence" for event in runtime.events("alice", run.id))

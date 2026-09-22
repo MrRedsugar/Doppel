@@ -1,6 +1,7 @@
 import importlib.util
 import ast
 from pathlib import Path
+import wave
 
 import pytest
 
@@ -15,6 +16,16 @@ def exporter():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_retired_skills_are_not_exported_and_shared_path_helper_is_available():
+    module = exporter()
+    assert module.allowed(Path('framework/python/doppel/paths.py'))
+    for name in ('skills', 'skill_api', 'skill_library'):
+        assert not module.allowed(Path(f'framework/python/doppel/{name}.py'))
+    assert not module.allowed(Path('android/sdk/src/main/assets/skills/guide/SKILL.md'))
+    assert not module.allowed(Path('framework/examples/skills/guide/SKILL.md'))
+    assert module.allowed(Path('framework/examples/mcp_server.py'))
 
 
 def test_public_export_is_independent_and_excludes_private_data(tmp_path):
@@ -32,6 +43,7 @@ def test_public_export_is_independent_and_excludes_private_data(tmp_path):
     assert 'android/sdk/src/main/assets/third_party/Apache-2.0.txt' in paths
     for required in (
         'framework/python/doppel/scheduler.py',
+        'framework/python/doppel/paths.py',
         'framework/tests/test_scheduler.py',
         'docs/developer/schedules.md',
         'docs/developer/model-connections.md',
@@ -57,15 +69,7 @@ def test_public_export_is_independent_and_excludes_private_data(tmp_path):
         'docs/developer/adb-shell-bridge.md',
         'docs/licenses/adb-shell-bridge.md',
         'android/sdk/src/main/java/dev/doppel/sdk/ConversationHistory.kt',
-        'android/sdk/src/main/java/dev/doppel/sdk/LearningTrace.kt',
-        'android/sdk/src/main/java/dev/doppel/sdk/LearnedSkillStore.kt',
-        'android/sdk/src/main/java/dev/doppel/sdk/AppLearning.kt',
         'docs/developer/web-research.md',
-        'android/sdk/src/main/java/dev/doppel/sdk/DirectSkills.kt',
-        'android/sdk/src/main/assets/skills/arknights/SKILL.md',
-        'android/sdk/src/main/assets/skills/arknights/references/stages-and-replay.md',
-        'android/sdk/src/main/assets/skills/arknights/references/battle-observation.md',
-        'android/sdk/src/main/assets/skills/arknights/references/sources.md',
         'android/sdk/src/main/assets/third_party/jsoup-LICENSE.txt',
         'android/sdk/src/main/assets/third_party/MPL-2.0.txt',
     ):
@@ -75,7 +79,7 @@ def test_public_export_is_independent_and_excludes_private_data(tmp_path):
         'DirectTaskEngine', 'DirectExecutionContext', 'GuardedActionPlan', 'LocalVisualMotor',
         'VisualAgentLoop', 'FeedbackOperator', 'FeedbackOperatorContext', 'FeedbackToolContract',
         'ContinuousAgentContext', 'ActionProgress', 'PerceptionRouting', 'DirectVisualReadCache',
-        'VisualActionHistory', 'SessionTrajectory', 'ModelActionHistory',
+        'VisualActionHistory', 'SessionTrajectory', 'ModelActionHistory', 'LearningTrace',
     ):
         relative = f'android/sdk/src/test/java/dev/doppel/sdk/legacy/{name}.kt'
         assert relative in paths
@@ -84,6 +88,8 @@ def test_public_export_is_independent_and_excludes_private_data(tmp_path):
     for name in ('LearningLiveTest', 'PerceptionLiveTest'):
         assert f'android/developer-app/src/androidTest/java/dev/doppel/developer/{name}.kt' not in paths
     assert not any(path.startswith('labs/') for path in paths)
+    assert not any(path.startswith(('android/sdk/src/main/assets/skills/', 'framework/examples/skills/')) for path in paths)
+    assert not any(f'framework/python/doppel/{name}.py' in paths for name in ('skills', 'skill_api', 'skill_library'))
     gui_sources = {
         'README.md', 'THIRD_PARTY_NOTICES.md', 'requirements.txt', 'start.ps1', 'stop.ps1',
         'models.py', 'prompts.py', 'fetch.py', 'protocol.py', 'patch_projection.py',
@@ -114,16 +120,27 @@ def test_public_export_is_independent_and_excludes_private_data(tmp_path):
     assert '.github/workflows/verify-public.yml' in paths
     assert not any(path.startswith(('product/', 'android/app/', '.local/', '.artifacts/', '.tooling/', '.venv/')) for path in paths)
     assert not any('private-server' in path or 'worklogs/' in path or '/build/' in path for path in paths)
-    assert not any(path.endswith(('.aar', '.so', '.zip', '.onnx', '.bin', '.wav', '.tar.bz2')) for path in paths)
+    assert not any(path.endswith(('.aar', '.so', '.zip', '.onnx', '.bin', '.tar.bz2')) for path in paths)
+    assert {path for path in paths if path.endswith('.wav')} == {'android/sdk/src/main/res/raw/task_completed.wav'}
     assert (output / 'README.md').is_file()
     assert ':app' not in (output / 'android/settings.gradle.kts').read_text()
     assert result['files'] == len(paths)
     assert result['bytes'] < 10 * 1024 * 1024
+    assert 'android/sdk/src/main/res/raw/task_completed.mp3' not in paths
+    with wave.open(str(output / 'android/sdk/src/main/res/raw/task_completed.wav'), 'rb') as sound:
+        assert sound.getnchannels() == 1
+        assert sound.getsampwidth() == 2
+        assert sound.getnframes() == sound.getframerate() // 4
     modules = {path.stem for path in (output / 'framework/python/doppel').glob('*.py')}
+    source_modules = {path.stem for path in (ROOT / 'framework/python/doppel').glob('*.py')}
     for path in (output / 'framework/python/doppel').glob('*.py'):
         for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
-            if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module:
-                assert node.module.split('.')[0] in modules, f'{path.name} dependency missing: {node.module}'
+            if isinstance(node, ast.ImportFrom) and node.level == 1:
+                dependencies = [node.module.split('.')[0]] if node.module else [name.name for name in node.names if name.name in source_modules]
+                for dependency in dependencies:
+                    assert dependency in modules, f'{path.name} dependency missing: {dependency}'
+    for required in exporter().RUNTIME_SUPPORT_FILES:
+        assert (output / required).read_bytes() == (ROOT / required).read_bytes()
     with pytest.raises(FileExistsError):
         exporter().export_public(ROOT, output)
 
@@ -139,6 +156,11 @@ def test_public_export_is_independent_and_excludes_private_data(tmp_path):
     'integrations/gui_grounding/prompts.py',
     'integrations/gui_grounding/refinement.py',
     'integrations/gui_grounding/tests/test_inference_lifecycle.py',
+    'framework/python/doppel/submission.py',
+    'android/sdk/src/main/assets/third_party/jina-reader/reader-core.js',
+    'android/sdk/src/main/assets/third_party/poi-android/NOTICE.txt',
+    'android/sdk/src/test/resources/attachments/simple.doc',
+    'scripts/prepare-android-office-parser.py',
 ])
 def test_export_rejects_missing_runtime_documentation_without_partial_output(tmp_path, missing_doc):
     module = exporter()
@@ -165,6 +187,12 @@ def test_export_rejects_missing_runtime_documentation_without_partial_output(tmp
     '.artifacts/perception-execution/20260909/gui/corpus/manifest.json',
     'scripts/device-lab-ui-private.py',
     'tests/test_device_lab_ui_private.py',
+    'tools/jina-reader-core/private.js',
+    'tools/jina-reader-core/node_modules/package/index.js',
+    'android/sdk/libs/poi-android-5.5.1.jar',
+    'android/sdk/src/main/assets/third_party/jina-reader/unreviewed.js',
+    'android/sdk/src/main/assets/third_party/poi-android/private.txt',
+    'android/sdk/src/test/resources/attachments/private.doc',
 ])
 def test_new_control_allowlist_denies_private_assets_and_unreviewed_siblings(private_path):
     assert not exporter().allowed(Path(private_path))
@@ -217,3 +245,13 @@ def test_export_still_rejects_private_product_dependencies(tmp_path, source_text
     with pytest.raises(ValueError, match='Private product reference'):
         module.export_public(source, output)
     assert not output.exists()
+
+
+def test_reviewed_literals_do_not_exempt_private_dependencies():
+    module = exporter()
+    for name, literal in module.PRIVATE_REFERENCE_LITERALS.items():
+        path = Path(name)
+        assert not module.has_private_reference(path, literal)
+        assert module.has_private_reference(Path('framework/python/doppel/cli.py'), literal)
+        for dependency in (b'import doppel_product', b'import dev.doppel.app.PrivateService', b'"/v1/auth/code"'):
+            assert module.has_private_reference(path, literal + b'\n' + dependency)

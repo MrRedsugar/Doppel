@@ -66,7 +66,7 @@ class SplitCaptureFreshnessTest {
         assertEquals("data:image/png;base64,post-approval-terminal",currentImage(e.takeWork()!!))
     }
 
-    @Test fun ordinaryPlannerKeepsOnlyOneDistinctPreviousImageAlongsideCurrent() {
+    @Test fun ordinaryPlannerKeepsCurrentImageAndTextFeedbackWithoutHistoricalImages() {
         start()
         for(name in listOf("older","previous","current","current")) {
             propose();screen(name)
@@ -78,7 +78,39 @@ class SplitCaptureFreshnessTest {
             (0 until content.length()).map {content.getJSONObject(it)}.filter {it.optString("type")=="image_url"}
                 .map {it.getJSONObject("image_url").getString("url")}
         }
-        assertEquals(listOf("data:image/png;base64,previous","data:image/png;base64,current"),images)
+        assertEquals(listOf("data:image/png;base64,current"),images)
         assertTrue(messages.toString().contains("需要重新规划"))
+    }
+
+    @Test fun resumedPlannerKeepsMemoryAndTaskFactsButDoesNotReloadRetiredSkills() {
+        val id=start()
+        val archived=e.get(id).put("knowledge",JSONArray()
+            .put(JSONObject().put("tool","load_skill").put("result","retired-skill-body"))
+            .put(JSONObject().put("tool","read_skill_resource").put("result","retired-reference-body"))
+            .put(JSONObject().put("tool","read_web").put("result","retained-web-source")))
+        archived.getJSONObject("task_state").put("facts",JSONArray().put("已核对用户选择"))
+            .put("completed_steps",JSONArray().put("已进入应用"))
+            .put("failed_routes",JSONArray().put("原入口不可用"))
+        val saved=JSONArray().put(archived).toString()
+        var persisted=saved
+        val restored=SplitTaskEngine(saved,{persisted=it},reviewMemory={JSONObject().put("items",JSONArray()
+            .put(JSONObject().put("content","用户要求先核对规格")))})
+        restored.control(id,"resume",JSONObject())
+        val c=restored.poll().getJSONObject("command")
+        restored.result(JSONObject().put("run_id",id).put("command_id",c.getString("id"))
+            .put("status","ok").put("data",JSONObject().put("image_base64","fresh-screen")))
+        val work=restored.takeWork()!!
+        val messages=work.payload.getJSONArray("messages")
+        val context=JSONObject(messages.getJSONObject(messages.length()-1).getJSONArray("content")
+            .getJSONObject(0).getString("text"))
+        assertEquals("进入1-7",context.getString("task"))
+        assertFalse(context.getJSONObject("task_state").has("goal"))
+        for(value in listOf("已核对用户选择","已进入应用","原入口不可用","用户要求先核对规格","retained-web-source"))
+            assertTrue(value,context.toString().contains(value))
+        assertFalse(work.payload.toString().contains("retired-"))
+        assertFalse(context.has("skills"));assertFalse(context.has("skill_reference"))
+        assertEquals("data:image/png;base64,fresh-screen",currentImage(work))
+        assertEquals(3,JSONObject(persisted).getJSONArray("items").getJSONObject(0).getJSONArray("knowledge").length())
+        assertTrue(restored.get(id).getJSONObject("task_state").has("goal"))
     }
 }

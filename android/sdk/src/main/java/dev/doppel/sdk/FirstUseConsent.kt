@@ -43,7 +43,6 @@ object FirstUseConsent {
     fun needsGuide(context: Context) = prefs(context).getInt("guide_version", 0) != GUIDE_VERSION
     fun finishGuide(context: Context): Boolean = prefs(context).edit().putInt("guide_version", GUIDE_VERSION).commit()
     fun revoke(context: Context): Boolean {
-        DemonstrationSession.cancel()
         return prefs(context).edit().remove("terms_version").remove("privacy_version").remove("accepted_at").commit()
     }
 }

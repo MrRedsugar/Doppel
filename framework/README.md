@@ -3,6 +3,8 @@
 Python gateway for controlled Android task execution, stable observation targets,
 host-enforced approvals, remote MCP extensions and bounded workbook operations.
 This package runs independently of the private Doppel product service.
+Skills imports and model tools have been removed; existing user data is retained.
+Document tools, remote MCP extensions and long-term memory remain available.
 
 ```sh
 python -m pip install -e '.[test]'

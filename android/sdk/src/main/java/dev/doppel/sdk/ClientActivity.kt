@@ -55,14 +55,22 @@ open class ClientActivity : Activity() {
     private var runControls: LinearLayout? = null
     private var runTitle: TextView? = null
     private var runGoal: TextView? = null
+    private var runAttachments: LinearLayout? = null
+    private var runVersions: LinearLayout? = null
+    private var editBanner: LinearLayout? = null
+    private var displayedVersionGroups = JSONArray()
     private var runProgress: UiActivitySignal? = null
     private var taskProgress: TaskProgressView? = null
     private var taskActions: LinearLayout? = null
-    private var reviewAction: Button? = null
     private var sendButton: ImageButton? = null
     private var classifying = false
+    private lateinit var attachments: ChatAttachmentsUi
     private val creating get() = taskCreation.get()
     private var latestRun: JSONObject? = null
+    private var queueView: LinearLayout? = null
+    private var queueSnapshot = JSONArray()
+    private var queueScope = ""
+    private val cancellingQueued = mutableSetOf<String>()
     private val io = Executors.newSingleThreadExecutor()
     private val handler = Handler(Looper.getMainLooper())
     private var visible = false
@@ -70,9 +78,10 @@ open class ClientActivity : Activity() {
     private var lastPending = ""
     private var onboardingOpen = false
     private var trustedInstallation = true
-    private val poll = object : Runnable { override fun run() { if (visible) { refreshRun(); handler.postDelayed(this, 2500) } } }
+    private val poll = object : Runnable { override fun run() { if (visible) { attachments.refresh(); refreshRun(); handler.postDelayed(this, 2500) } } }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState); UiTheme.init(this)
+        TaskCompletionDelivery.registerChannels(this)
         trustedInstallation = ReleaseIntegrity.isTrusted(this)
         if (!trustedInstallation) {
             val error = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(24), dp(24), dp(24), dp(24)) }
@@ -82,6 +91,10 @@ open class ClientActivity : Activity() {
             setContentView(error); return
         }
         gateway = Gateway(this)
+        attachments = ChatAttachmentsUi(this, gateway, io, { creating || classifying }) { message ->
+            sendButton?.isEnabled = !creating && !classifying && !attachments.processing()
+            if (message != null) { status.text = message; Toast.makeText(this, message, Toast.LENGTH_LONG).show() }
+        }.also { it.restore(savedInstanceState) }
         onboardingOpen = savedInstanceState?.getBoolean("onboarding_open") ?: false
         section = savedInstanceState?.getString("section") ?: "任务"
         freshConversation = gateway.selectedConversationRun() == "" || (savedInstanceState?.getBoolean("fresh_conversation") ?: false)
@@ -117,7 +130,7 @@ open class ClientActivity : Activity() {
             setCompoundDrawablesRelative(symbol, null, null, null); compoundDrawablePadding = dp(10)
         }, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(20); bottomMargin = dp(18) })
         val links = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val sections = (if (gateway.prefs.getString("active_run", "").isNullOrBlank()) emptyList() else listOf("任务")) + listOf("定时任务", "记录", "设置") + additionalSections
+        val sections = listOf("任务", "定时任务", "记录", "设置") + additionalSections
         for (name in sections) {
             val icon = when(name) { "任务" -> UiIcons.play; "定时任务", "记录" -> UiIcons.history; "设置" -> UiIcons.settings; else -> UiIcons.account }
             val row = UiTheme.navigationRow(this, if (name == "任务") "当前任务" else name, icon, name == section) {
@@ -135,9 +148,10 @@ open class ClientActivity : Activity() {
     private fun newConversation() {
         android.util.Log.i("DoppelEntry", "new_conversation requested")
         saveDraft()
-        if (creating || classifying) { status.text = "正在处理消息，请稍候"; return }
-        val id = gateway.prefs.getString("active_run", "").orEmpty()
+        if (creating || classifying || attachments.processing()) { status.text = "正在处理消息或附件，请稍候"; return }
         fun clear() {
+            gateway.prefs.edit().remove("conversation_edit_${gateway.conversationKey()}").commit()
+            attachments.clearDraft()
             gateway.startNewConversation()
             android.util.Log.i("DoppelEntry", "new_conversation selected")
             latestRun = null; runEvents = null; eventsRunId = ""; freshConversation = true
@@ -150,13 +164,10 @@ open class ClientActivity : Activity() {
             }
         }
         fun confirmClear() {
-            if (gateway.prefs.getString("draft_goal", "").isNullOrBlank()) clear()
+            if (gateway.prefs.getString("draft_goal", "").isNullOrBlank() && !attachments.hasDraft()) clear()
             else UiDialog.Builder(this).setTitle("开始新任务？").setMessage("当前草稿将被清除，之前的任务保留在记录中。").setNegativeButton("保留草稿", null).setPositiveButton("新任务") { _, _ -> clear() }.show()
         }
-        if (id.isBlank()) { confirmClear(); return }
-        NewTaskEntry.open(this, gateway, gateway.prefs.getString("draft_goal", "").orEmpty(), onKeep = { selectSection("任务") }) {
-            if (visible && !isFinishing && !isDestroyed) clear()
-        }
+        confirmClear()
     }
     protected fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
     protected fun label(text: String, size: Float = 15f): TextView = UiTheme.text(this, text, size, UiTheme.ink, size >= 18f).apply { setPadding(0, dp(8), 0, dp(12)); page.addView(this) }
@@ -280,12 +291,15 @@ open class ClientActivity : Activity() {
     protected open fun customPage(section: String) {}
     private fun render() {
         if (!FirstUseConsent.isAccepted(this)) return
-        page.removeAllViews(); goal = null; runView = null; runProcess = null; runControls = null; runTitle = null; runGoal = null; runProgress = null; taskProgress = null; taskActions = null; reviewAction = null; sendButton = null; lastPending = ""
+        attachments.detachDraftView(); runAttachments = null
+        page.removeAllViews(); goal = null; runView = null; runProcess = null; runControls = null; runTitle = null; runGoal = null; runProgress = null; taskProgress = null; taskActions = null; sendButton = null; lastPending = ""
         composerDock.removeAllViews(); composerDock.visibility = if (section == "任务") View.VISIBLE else View.GONE
-        emptyConversation = null; conversationContent = null; chatHistory = null; chatHeading = null
+        emptyConversation = null; conversationContent = null; chatHistory = null; chatHeading = null; queueView = null
         when(section) { "任务" -> tasks(); "设置" -> settings(); "记录" -> history(); else -> customPage(section) }
     }
     private fun tasks() {
+        queueView = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }.also { page.addView(it) }
+        renderQueue()
         val empty = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(12), dp(24), dp(12), dp(36)) }
         empty.addView(ImageView(this).apply { setImageResource(UiIcons.sparkles); UiTheme.bind(this) { imageTintList = ColorStateList.valueOf(UiTheme.ink) }; background = UiTheme.glass(this@ClientActivity, 20); setPadding(dp(15), dp(15), dp(15), dp(15)) }, LinearLayout.LayoutParams(dp(64), dp(64)).apply { gravity = Gravity.CENTER_HORIZONTAL; bottomMargin = dp(24) })
         val existingTitle = gateway.conversationTitle().trim()
@@ -307,13 +321,12 @@ open class ClientActivity : Activity() {
             recent.removeAllViews()
             recent.addView(UiTheme.text(this, "最近执行", 12f, UiTheme.muted, true))
             if (items == null || items.length() == 0) {
-                recent.addView(UiTheme.text(this, "完成第一个任务后，这里会显示执行记录和复盘入口。", 13f, UiTheme.muted).apply { setPadding(0, dp(8), 0, dp(4)) })
+                recent.addView(UiTheme.text(this, "完成第一个任务后，可以在这里查看记录并继续聊天。", 13f, UiTheme.muted).apply { setPadding(0, dp(8), 0, dp(4)) })
             } else {
-                val states = mapOf("completed" to "已完成", "failed" to "未完成", "cancelled" to "已取消", "paused" to "已暂停", "running" to "执行中")
                 for (i in 0 until minOf(3, items.length())) {
                     val item = items.optJSONObject(i) ?: continue
                     val displayTitle = item.optString("title").ifBlank { item.optString("goal") }.ifBlank { "未命名任务" }
-                    val row = UiTheme.row(this, displayTitle.take(42), TaskPresentation.withSourceLabel(item, states[item.optString("status")] ?: item.optString("status")), android.R.drawable.ic_menu_recent_history) { openReview(item) }
+                    val row = UiTheme.row(this, displayTitle.take(42), TaskPresentation.withSourceLabel(item, TaskPresentation.title(item.optString("status"))), android.R.drawable.ic_menu_recent_history) { openTaskChat(item) }
                     recent.addView(row, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(3) })
                 }
                 recent.addView(UiTheme.command(this, "查看全部记录") { selectSection("记录") }, LinearLayout.LayoutParams(-1, dp(40)).apply { topMargin = dp(6) })
@@ -327,22 +340,19 @@ open class ClientActivity : Activity() {
         conversationRows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }.also { messages.addView(it) }
         renderedConversation = ""
         val userRow = LinearLayout(this).apply { gravity = Gravity.END; setPadding(dp(32), dp(8), 0, dp(26)) }
-        runGoal = UiTheme.text(this, "", 15f).apply { background = UiTheme.glass(this@ClientActivity, 20); setPadding(dp(16), dp(13), dp(16), dp(13)); setTextIsSelectable(true) }
+        runGoal = UiTheme.text(this, "", 15f).apply { background = UiTheme.glass(this@ClientActivity, 20); setPadding(dp(16), dp(13), dp(16), dp(13)) }
         userRow.addView(runGoal, LinearLayout.LayoutParams(-2, -2)); messages.addView(userRow)
+        runVersions = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }.also { messages.addView(it) }
+        runAttachments = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }.also { messages.addView(it) }
         val assistantHeading = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         assistantHeading.addView(ImageView(this).apply { setImageResource(UiIcons.sparkles); UiTheme.bind(this) { imageTintList = ColorStateList.valueOf(UiTheme.ink) } }, LinearLayout.LayoutParams(dp(22), dp(22)).apply { marginEnd = dp(10) })
         runTitle = UiTheme.text(this, "", 14f, UiTheme.ink, true); assistantHeading.addView(runTitle, LinearLayout.LayoutParams(0, -2, 1f))
         runProgress = UiActivitySignal(this).apply { visibility = View.GONE }
         assistantHeading.addView(runProgress, LinearLayout.LayoutParams(dp(18), dp(18))); messages.addView(assistantHeading)
         taskProgress = TaskProgressView(this).also { messages.addView(it, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10); bottomMargin = dp(4) }) }
-        runView = UiTheme.text(this, "", 16f).apply { setLineSpacing(dp(4).toFloat(), 1f); setTextIsSelectable(true); setPadding(0, dp(14), 0, dp(8)) }; messages.addView(runView)
+        runView = UiTheme.text(this, "", 16f).apply { setLineSpacing(dp(4).toFloat(), 1f); setPadding(0, dp(14), 0, dp(8)) }; messages.addView(runView)
         runProcess = UiTheme.text(this, "", 13f, UiTheme.muted).apply { visibility = View.GONE; setLineSpacing(dp(5).toFloat(), 1f); setTextIsSelectable(true); setPadding(dp(14), dp(12), dp(14), dp(12)); background = UiTheme.glass(this@ClientActivity, 16) }
         messages.addView(runProcess, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8); bottomMargin = dp(8) })
-        reviewAction = UiTheme.command(this, "复盘这次任务") { latestRun?.let { openReview(it) } }.apply {
-            visibility = View.GONE
-            contentDescription = "复盘这次任务"
-        }
-        messages.addView(reviewAction, LinearLayout.LayoutParams(-1, dp(44)).apply { topMargin = dp(6); bottomMargin = dp(8) })
         val composer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; background = UiTheme.glass(this@ClientActivity)
             elevation = dp(5).toFloat(); outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
@@ -355,6 +365,10 @@ open class ClientActivity : Activity() {
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { synchronized(draftLock) { gateway.prefs.edit().putString("draft_goal", s?.toString().orEmpty()).apply() } }
             override fun afterTextChanged(s: android.text.Editable?) {}
         })
+        editBanner = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }.also { composer.addView(it) }
+        refreshEditBanner()
+        val attachmentRows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        composer.addView(attachmentRows, LinearLayout.LayoutParams(-1, -2)); attachments.attachDraftView(attachmentRows)
         composer.addView(goal, LinearLayout.LayoutParams(-1, -2))
         val composerTools = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         val modeNames = listOf("请求批准", "帮我批准", "完全访问")
@@ -368,14 +382,19 @@ open class ClientActivity : Activity() {
             }
         }
         composerTools.addView(mode, LinearLayout.LayoutParams(0, dp(44), 1f))
+        composerTools.addView(UiTheme.icon(this, UiIcons.plus, "添加图片或文件") { attachments.choose() }, LinearLayout.LayoutParams(dp(44), dp(44)))
         composerTools.addView(UiTheme.icon(this, android.R.drawable.ic_btn_speak_now, "语音输入") { startActivity(Intent(this, VoiceActivity::class.java)) }, LinearLayout.LayoutParams(dp(44), dp(44)))
         sendButton = UiTheme.icon(this, UiIcons.arrowUp, "开始任务", true) {
             android.util.Log.i("DoppelEntry", "composer submit requested")
-            val value = goal?.text.toString().trim()
-            if (value.isBlank()) { goal?.error = "请输入任务"; return@icon }
-            if (creating || classifying) return@icon
+            val capturedAttachments = attachments.draft()
+            val typed = goal?.text.toString().trim()
+            if (typed.isBlank() && capturedAttachments.length() == 0) { goal?.error = "请输入消息或添加附件"; return@icon }
+            if (creating || classifying || attachments.processing()) return@icon
+            val value = typed.ifBlank { "请查看这些附件。" }
+            val edit = pendingMessageEdit()?.optJSONObject("target")
             classifying = true
             sendButton?.isEnabled = false
+            status.text = if (capturedAttachments.length() > 0) "正在处理消息，AI 可按需读取附件" else "正在处理消息"
             saveDraft()
             val selected = gateway.prefs.getInt("mode_index", 1).coerceIn(0, 2)
             val (conversation, afterRun) = synchronized(gateway.prefs) { gateway.conversationKey() to gateway.selectedConversationRun().orEmpty() }
@@ -387,17 +406,29 @@ open class ClientActivity : Activity() {
                     check(conversation == gateway.conversationKey() && afterRun == gateway.selectedConversationRun().orEmpty()) { "对话或关联任务已变化，请重新发送" }
                     val device = gateway.prepareUserConnection()
                     check(conversation == gateway.conversationKey() && afterRun == gateway.selectedConversationRun().orEmpty()) { "连接或对话已变化，请重新发送" }
-                    val intent = gateway.request("POST", "/conversation/intent", JSONObject()
-                        .put("message", value).put("history", gateway.conversationContext(conversation, afterRun)).put("device_available", device.isNotBlank()))
-                    val savedReply = persistConversationReply(intent, value, conversation, afterRun)
+                    val connection = gateway.captureReviewConnection()
+                    check(connection.direct || capturedAttachments.length() == 0) { "附件需要使用本机模型连接，请在模型设置中启用" }
+                    val revision = edit?.let { gateway.prepareConversationRevision(it, value, capturedAttachments, connection) }
+                    val requestId = revision?.getString("request_id") ?: gateway.conversationRequestId(conversation, afterRun, value, capturedAttachments)
+                    val request = JSONObject().put("message", value)
+                        .put("history", revision?.getJSONArray("history") ?: gateway.conversationContext(conversation, afterRun, connection)).put("device_available", device.isNotBlank())
+                    if (capturedAttachments.length() > 0) request.put("attachments", capturedAttachments)
+                    // Older remote gateways reject unknown fields; the local runtime owns local chat memory.
+                    if (connection.direct) request.put("conversation_id", conversation).put("request_id", requestId).put("run_id", afterRun)
+                    val intent = connection.request("POST", "/conversation/intent", request).put("request_id", requestId)
+                    val savedReply = persistConversationReply(intent, value, conversation, afterRun, capturedAttachments, revision)
                     runOnUiThread {
                         classifying = false
                         if (isDestroyed) return@runOnUiThread
-                        if (conversation != gateway.conversationKey() || afterRun != gateway.selectedConversationRun().orEmpty()) { sendButton?.isEnabled = true; status.text = "对话或关联任务已变化，请在当前对话重新发送"; return@runOnUiThread }
+                        if (conversation != gateway.conversationKey() || (afterRun != gateway.selectedConversationRun().orEmpty() && !(savedReply && revision != null))) { sendButton?.isEnabled = true; status.text = "对话或关联任务已变化，请在当前对话重新发送"; return@runOnUiThread }
                         try {
                             if (savedReply) {
-                                reconcileRepliedDraft(); renderLocalChat(true); sendButton?.isEnabled = true; status.text = connectionSummary()
-                            } else handleMessageIntent(intent, value, device, selected)
+                                reconcileRepliedDraft(); attachments.refresh(); refreshEditBanner(); renderLocalChat(true); sendButton?.isEnabled = true; status.text = connectionSummary()
+                                if (revision != null) showSelectedConversation()
+                            } else {
+                                handleMessageIntent(intent, value, device, selected, capturedAttachments, revision)
+                                gateway.finishConversationRequest(conversation, intent.optString("request_id"))
+                            }
                         }
                         catch (error: Exception) { sendButton?.isEnabled = true; status.text = ConversationIntent.failureMessage(error) }
                     }
@@ -412,31 +443,29 @@ open class ClientActivity : Activity() {
                 }
             }
         }
-        sendButton?.isEnabled = !creating && !classifying
+        sendButton?.isEnabled = !creating && !classifying && !attachments.processing()
         composerTools.addView(sendButton, LinearLayout.LayoutParams(dp(44), dp(44))); composer.addView(composerTools); composerDock.addView(composer)
         val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.START; visibility = View.GONE }; messages.addView(actions, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) }); taskActions = actions
         for ((text, operation) in listOf("暂停执行" to "pause", "继续执行" to "resume", "停止任务" to "cancel")) actions.addView(UiTheme.command(this, text) {
-            val run = gateway.prefs.getString("active_run", "").orEmpty(); if (run.isBlank()) return@command
+            val shown = latestRun ?: return@command
+            val run = shown.optString("id"); if (run.isBlank()) return@command
             TaskControl.request(this, run, operation) { response, error ->
-                if (!visible || isDestroyed || gateway.prefs.getString("active_run", "") != run) return@request
+                if (!visible || isDestroyed || latestRun?.optString("id") != run) return@request
                 if (response == null) status.text = error ?: "操作尚未确认"
-                else { displayRun(response); if (operation == "resume" && response.optString("status") == "running") TaskControl.startWorker(this) }
+                else { displayRun(response); if (operation == "resume" && response.optString("status") == "running") TaskControl.startWorker(this); refreshRun() }
             }
         }.apply { setPadding(dp(8), 0, dp(8), 0) }, LinearLayout.LayoutParams(0, dp(46), 1f).apply { if (operation != "pause") marginStart = dp(8) })
         runControls = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }; messages.addView(runControls, messages.indexOfChild(actions))
-        val active = gateway.prefs.getString("active_run", "").orEmpty()
-        val selectedRun = gateway.selectedConversationRun()
-        if (active.isBlank() && !freshConversation) runCatching { JSONObject(gateway.prefs.getString("last_result", "{}").orEmpty()) }.getOrNull()?.takeIf {
-            it.optString("id").isNotBlank() && (selectedRun == null || it.optString("id") == selectedRun)
-        }?.let { latestRun = it }
-        latestRun?.takeIf { it.optString("id") == active || active.isBlank() && !freshConversation && (selectedRun == null || it.optString("id") == selectedRun) }?.let { displayRun(it) }
-        val pendingRun = active.ifBlank { if (freshConversation) "" else selectedRun.orEmpty() }
-        if (pendingRun.isNotBlank() && latestRun?.optString("id") != pendingRun) { empty.visibility = View.GONE; messages.visibility = View.VISIBLE; runTitle?.text = "正在读取任务"; runProgress?.visibility = View.VISIBLE }
+        val selectedRun = if (freshConversation) "" else gateway.selectedConversationRun().orEmpty()
+        latestRun?.takeIf { it.optString("id") == selectedRun }?.let { displayRun(it) }
+        if (selectedRun.isNotBlank() && latestRun?.optString("id") != selectedRun) {
+            empty.visibility = View.GONE; messages.visibility = View.VISIBLE; runTitle?.text = "正在读取任务"
+        }
         refreshRun()
     }
 
     /** Complete only chat/clarification on IO; a dead screen must never start a device task. */
-    private fun persistConversationReply(intent: JSONObject, value: String, key: String, afterRun: String): Boolean {
+    private fun persistConversationReply(intent: JSONObject, value: String, key: String, afterRun: String, refs: JSONArray, revision: JSONObject? = null): Boolean {
         val rawKind = intent.optString("intent", intent.optString("type")).lowercase(Locale.ROOT)
         val parsed = if (rawKind.isNotBlank()) ConversationIntent.parse(intent.toString()) else null
         val kind = parsed?.kind?.name?.lowercase(Locale.ROOT) ?: rawKind
@@ -448,30 +477,37 @@ open class ClientActivity : Activity() {
             else -> return false
         }
         synchronized(draftLock) {
-            gateway.appendCapturedConversationReply(key, afterRun, value, reply, parsed?.title ?: intent.optString("title"))
+            val memory = intent.optJSONObject("memory_result")
+            val note = when {
+                memory?.has("error") == true -> "长期记忆未更新：${memory.optString("error")}"
+                memory != null && memory.optInt("applied") > 0 -> "已更新长期记忆，可在设置中编辑或删除。"
+                else -> ""
+            }
+            val answer = if (note.isBlank()) reply else "$reply\n\n$note"
+            if (revision == null) gateway.appendCapturedConversationReply(key, afterRun, value,
+                answer, parsed?.title ?: intent.optString("title"), intent.optString("request_id"), refs)
+            else gateway.commitConversationRevision(revision, answer, parsed?.title ?: intent.optString("title"))
             if (key == gateway.conversationKey()) {
                 repliedDraft.set(key to value)
-                if (gateway.prefs.getString("draft_goal", "").orEmpty().trim() == value)
-                    check(gateway.prefs.edit().putString("draft_goal", "").commit()) { "回复已保存，输入框状态尚未保存" }
             }
         }
         return true
     }
 
-    private fun handleMessageIntent(intent: JSONObject, value: String, device: String, selected: Int) {
+    private fun handleMessageIntent(intent: JSONObject, value: String, device: String, selected: Int, refs: JSONArray, revision: JSONObject? = null) {
         val rawKind = intent.optString("intent", intent.optString("type")).lowercase(Locale.ROOT)
         val parsed = if (rawKind.isNotBlank()) ConversationIntent.parse(intent.toString()) else null
         val kind = parsed?.kind?.name?.lowercase(Locale.ROOT) ?: rawKind
         when (kind) {
             "task" -> if (parsed?.canStartTask() == true)
-                submitClassifiedTask(parsed.goal, device, selected, parsed.title.ifBlank { null }, value)
-            "run", "device_task" -> submitClassifiedTask(value, device, selected, intent.optString("title").trim().ifBlank { null })
+                submitClassifiedTask(value, device, selected, parsed.title.ifBlank { null }, parsed.goal, refs, revision)
+            "run", "device_task" -> submitClassifiedTask(value, device, selected, intent.optString("title").trim().ifBlank { null }, refs = refs, revision = revision)
             else -> {
                 // Older gateways answer an unknown route with their generic JSON
                 // envelope. Keep those installations usable while new gateways
                 // return an explicit `uncertain` and fail closed.
                 if (!intent.has("intent") && !intent.has("type"))
-                    submitClassifiedTask(value, device, selected, null)
+                    submitClassifiedTask(value, device, selected, null, refs = refs, revision = revision)
                 else { sendButton?.isEnabled = true; status.text = "模型没有明确判断这是对话还是手机任务，请换一种说法" }
             }
         }
@@ -492,12 +528,141 @@ open class ClientActivity : Activity() {
         }
     }
 
+    private fun pendingMessageEdit(): JSONObject? = gateway.prefs.getString("conversation_edit_${gateway.conversationKey()}", null)
+        ?.let { runCatching { JSONObject(it) }.getOrNull() }
+
+    private fun focusComposer() {
+        val editor = goal ?: return
+        editor.requestFocus(); editor.setSelection(editor.text.length)
+        editor.post { if (!isDestroyed && editor.hasWindowFocus()) getSystemService(android.view.inputmethod.InputMethodManager::class.java)
+            .showSoftInput(editor, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT) }
+        conversationScroll.post { conversationScroll.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    private fun refreshEditBanner() {
+        val banner = editBanner ?: return
+        banner.removeAllViews()
+        banner.visibility = if (pendingMessageEdit() == null) View.GONE else View.VISIBLE
+        if (banner.visibility == View.GONE) return
+        banner.addView(UiTheme.text(this, "正在修改上一条消息", 12f, UiTheme.muted), LinearLayout.LayoutParams(0, -2, 1f))
+        banner.addView(UiTheme.icon(this, UiIcons.close, "取消修改") {
+            if (creating || classifying || attachments.processing()) return@icon
+            val pending = pendingMessageEdit() ?: return@icon
+            runCatching {
+                attachments.replaceDraft(pending.optJSONArray("previous_attachments") ?: JSONArray())
+                check(gateway.prefs.edit().remove("conversation_edit_${gateway.conversationKey()}")
+                    .putString("draft_goal", pending.optString("previous_text")).commit()) { "草稿未恢复" }
+                goal?.setText(pending.optString("previous_text")); refreshEditBanner()
+            }.onFailure { status.text = it.message ?: "无法取消修改" }
+        }, LinearLayout.LayoutParams(dp(44), dp(44)))
+    }
+
+    private fun editMessage(kind: String, turnId: String) {
+        if (creating || classifying || attachments.processing()) return
+        val key = gateway.conversationKey()
+        val connection = gateway.captureReviewConnection()
+        async({ gateway.revisionTarget(connection) ?: JSONObject() }) { target ->
+            if (key != gateway.conversationKey()) return@async
+            if (target.optString("kind") != kind || target.optString("turn_id") != turnId) {
+                status.text = "目前可以修改当前对话的最后一个问题；执行中的任务请先结束"; return@async
+            }
+            fun begin() {
+                if (creating || classifying || attachments.processing() || key != gateway.conversationKey()) return
+                val previousEdit = gateway.prefs.getString("conversation_edit_$key", null)
+                runCatching {
+                    val old = pendingMessageEdit()
+                    val pending = JSONObject().put("target", target)
+                        .put("previous_text", old?.optString("previous_text") ?: goal?.text?.toString().orEmpty())
+                        .put("previous_attachments", old?.optJSONArray("previous_attachments") ?: attachments.draft())
+                    check(gateway.prefs.edit().putString("conversation_edit_$key", pending.toString()).commit()) { "修改草稿未保存" }
+                    attachments.replaceDraft(target.optJSONArray("attachments") ?: JSONArray())
+                    goal?.setText(target.optString("text")); refreshEditBanner(); focusComposer()
+                }.onFailure {
+                    gateway.prefs.edit().apply { if (previousEdit == null) remove("conversation_edit_$key") else putString("conversation_edit_$key", previousEdit) }.commit()
+                    refreshEditBanner(); status.text = it.message ?: "无法修改消息"
+                }
+            }
+            if (pendingMessageEdit() == null && (!goal?.text.isNullOrBlank() || attachments.hasDraft()))
+                UiDialog.Builder(this).setTitle("修改上一条消息？").setMessage("当前草稿会暂存，取消修改后恢复。").setNegativeButton("返回", null)
+                    .setPositiveButton("修改") { _, _ -> begin() }.show()
+            else begin()
+        }
+    }
+
+    private fun bindMessageMenu(view: TextView, kind: String = "", turnId: String = "", user: Boolean = false) {
+        view.setTextIsSelectable(false)
+        view.setOnLongClickListener {
+            val text = view.text.toString()
+            PopupMenu(this, view).apply {
+                menu.add(0, 1, 0, "复制")
+                if (user) menu.add(0, 2, 1, "修改").isEnabled = !creating && !classifying && !attachments.processing()
+                menu.add(0, 3, 2, "追问").isEnabled = !creating && !classifying && !attachments.processing()
+                setOnMenuItemClickListener { item ->
+                    when (item.itemId) {
+                        1 -> { getSystemService(android.content.ClipboardManager::class.java)
+                            .setPrimaryClip(android.content.ClipData.newPlainText("消息", text))
+                            if (Build.VERSION.SDK_INT < 33) Toast.makeText(this@ClientActivity, "已复制", Toast.LENGTH_SHORT).show() }
+                        2 -> editMessage(kind, turnId)
+                        3 -> {
+                            if (pendingMessageEdit() != null) status.text = "请先完成或取消当前修改"
+                            else {
+                                val quote = text.take(1200) + if (text.length > 1200) "…（节选）" else ""
+                                goal?.setText("关于这条消息：\n「$quote」\n\n${goal?.text?.toString().orEmpty()}")
+                                focusComposer()
+                            }
+                        }
+                    }
+                    true
+                }
+                show()
+            }
+            true
+        }
+    }
+
+    private fun showSelectedConversation() {
+        latestRun = null; runEvents = null; eventsRunId = ""
+        freshConversation = gateway.selectedConversationRun().isNullOrBlank()
+        render()
+        conversationScroll.post { conversationScroll.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    private fun appendVersionPicker(parent: LinearLayout, kind: String, turnId: String) {
+        val groups = displayedVersionGroups
+        val group = (0 until groups.length()).map { groups.getJSONObject(it) }.firstOrNull {
+            it.getJSONObject("anchor").optString("kind") == kind && it.getJSONObject("anchor").optString("turn_id") == turnId
+        } ?: return
+        val items = group.getJSONArray("items"); if (items.length() < 2) return
+        val index = group.getInt("index")
+        val row = LinearLayout(this).apply { gravity = Gravity.END or Gravity.CENTER_VERTICAL }
+        fun button(step: Int) = UiTheme.icon(this, if (step < 0) UiIcons.back else UiIcons.next, if (step < 0) "上一个版本" else "下一个版本") {
+            if (creating || classifying || attachments.processing()) return@icon
+            if (pendingMessageEdit() != null) { status.text = "请先完成或取消当前修改"; return@icon }
+            runCatching {
+                saveDraft(); gateway.selectConversationVersion(group, items.getJSONObject(index + step).getString("id"))
+                showSelectedConversation()
+            }.onFailure { status.text = it.message ?: "版本未能打开" }
+        }.apply { isEnabled = index + step in 0 until items.length(); alpha = if (isEnabled) 1f else 0.3f }
+        row.addView(button(-1), LinearLayout.LayoutParams(dp(44), dp(44)))
+        row.addView(UiTheme.text(this, "${index + 1} / ${items.length()}", 12f, UiTheme.muted).apply { contentDescription = "消息版本 ${index + 1} / ${items.length()}" })
+        row.addView(button(1), LinearLayout.LayoutParams(dp(44), dp(44)))
+        parent.addView(row, LinearLayout.LayoutParams(-1, dp(44)))
+    }
+
     private fun renderLocalChat(scrollToReply: Boolean = false) {
         val target = chatHistory ?: return
         chatHeading?.text = gateway.conversationTitle().ifBlank { "今天想和 Doppel 做什么？" }
-        target.removeAllViews()
         val messages = gateway.conversationMessages()
+        displayedVersionGroups = gateway.conversationVersionGroups()
         val displayed = latestRun?.optString("id").takeIf { conversationContent?.visibility == View.VISIBLE }
+        emptyConversation?.visibility = if (messages.length() == 0 && displayed == null) View.VISIBLE else View.GONE
+        val stamp = messages.toString() + displayed.orEmpty()
+        if (target.tag == stamp) {
+            latestRun?.takeIf { displayed != null }?.let { renderConversation(it) }
+            if (scrollToReply) conversationScroll.post { if (!isDestroyed) conversationScroll.fullScroll(View.FOCUS_DOWN) }
+            return
+        }
+        target.tag = stamp; target.removeAllViews()
         for (i in 0 until messages.length()) {
             val item = messages.optJSONObject(i) ?: continue
             if (displayed != null && item.optString("after_run_id") != displayed) continue
@@ -505,90 +670,138 @@ open class ClientActivity : Activity() {
             val text = item.optString("content").trim()
             if (text.isBlank()) continue
             val bubble = UiTheme.text(this, text, 15f, if (role == "user") UiTheme.ink else UiTheme.muted).apply {
-                setLineSpacing(dp(3).toFloat(), 1f); setTextIsSelectable(true); setPadding(dp(15), dp(11), dp(15), dp(11))
+                setLineSpacing(dp(3).toFloat(), 1f); setPadding(dp(15), dp(11), dp(15), dp(11))
                 if (role == "user") background = UiTheme.glass(this@ClientActivity, 18)
             }
+            val turnId = item.optString("turn_id").ifBlank { item.optString("request_id") }
+            val deleted = item.optBoolean("deleted")
+            if (!deleted) bindMessageMenu(bubble, "chat", turnId, role == "user")
             target.addView(bubble, LinearLayout.LayoutParams(if (role == "user") -2 else -1, -2).apply {
                 gravity = if (role == "user") Gravity.END else Gravity.START
                 marginStart = if (role == "user") dp(34) else 0; marginEnd = if (role == "user") 0 else dp(18)
                 topMargin = dp(8); bottomMargin = dp(4)
             })
+            if (role == "user" || deleted) appendVersionPicker(target, if (deleted) "task" else "chat", turnId)
+            attachments.append(target, item.optJSONArray("attachments"))
         }
         latestRun?.takeIf { displayed != null }?.let { renderConversation(it) }
         if (scrollToReply) conversationScroll.post { if (!isDestroyed) conversationScroll.fullScroll(View.FOCUS_DOWN) }
     }
 
-    private fun submitClassifiedTask(value: String, device: String, selected: Int, title: String?, originalMessage: String = value) {
+    private fun submitClassifiedTask(value: String, device: String, selected: Int, title: String?, contextGoal: String? = null, refs: JSONArray = JSONArray(), revision: JSONObject? = null) {
         if (device.isBlank()) { sendButton?.isEnabled = true; status.text = "请先连接并绑定设备"; selectSection("设置"); return }
         if (DoppelAccessibilityService.instance == null) { sendButton?.isEnabled = true; status.text = "请先启用无障碍服务"; selectSection("设置"); return }
-        val active = gateway.prefs.getString("active_run", "").orEmpty()
-        if (active.isNotBlank() && (latestRun?.optString("id") != active || latestRun?.optString("status") !in setOf("completed", "failed", "cancelled"))) {
-            sendButton?.isEnabled = true
-            NewTaskEntry.open(this, gateway, originalMessage, onKeep = { refreshRun() }) {
-                if (visible && !isFinishing && !isDestroyed) sendButton?.performClick()
-            }
-            return
-        }
         if (!taskCreation.compareAndSet(false, true)) { sendButton?.isEnabled = true; return }
         val creationGeneration = TaskControl.currentGeneration()
+        val connection = gateway.captureReviewConnection()
         io.execute {
             try {
-                val body = JSONObject().put("device_id", device).put("goal", value).put("mode", listOf("ask", "assist", "full")[selected])
-                if (!title.isNullOrBlank()) body.put("title", title)
-                val run = gateway.createConversationRun(body)
-                synchronized(draftLock) { synchronized(gateway.prefs) {
-                    val editor = gateway.prefs.edit().putString("active_run", run.getString("id"))
-                    if (gateway.prefs.getString("draft_goal", "").orEmpty().trim() == originalMessage) editor.putString("draft_goal", "")
-                    submittedDraft.set(run.getString("id") to originalMessage); editor.commit()
-                } }
-                pendingWorkerGeneration.set(creationGeneration); pendingWorkerRun.set(run.getString("id"))
-                runOnUiThread {
-                    // A recreated screen consumes the persisted task through refreshRun; the old screen must not move its task to the background.
-                    if (!visible || isFinishing || isDestroyed) return@runOnUiThread
-                    reconcileSubmittedDraft(); moveTaskToBack(true); displayRun(run); startCreatedWorker(run)
+                // Older gateways reject unknown fields. Original user text remains authoritative on both paths.
+                val body = ConversationIntent.taskRequest(value, device, listOf("ask", "assist", "full")[selected], title,
+                    contextGoal.takeIf { connection.direct })
+                if (refs.length() > 0) body.put("attachments", refs)
+                val run = if (revision == null) gateway.createConversationRun(body, connection)
+                    else gateway.createConversationRevisionRun(revision, body, connection)
+                synchronized(draftLock) {
+                    if (connection.scope == gateway.reviewScope()) {
+                        if (gateway.prefs.getString("draft_goal", "").orEmpty().trim() == value)
+                            gateway.prefs.edit().putString("draft_goal", "").commit()
+                        submittedDraft.set(run.getString("id") to value)
+                    }
                 }
+                TaskControl.reconcileCreatedRun(this, run, creationGeneration, connection) { reconciled, error ->
+                    taskCreation.set(false)
+                    if (!isDestroyed) sendButton?.isEnabled = true
+                    if (connection.scope != gateway.reviewScope()) return@reconcileCreatedRun
+                    if (reconciled != null) {
+                        runCatching { TaskControl.wakeQueue(this) }
+                        if (visible && !isFinishing && !isDestroyed && gateway.selectedConversationRun() == reconciled.optString("id")) {
+                            reconcileSubmittedDraft(); displayRun(reconciled); refreshRun()
+                            if (reconciled.optString("status") == "running") moveTaskToBack(true)
+                        }
+                    } else if (!isDestroyed) status.text = error ?: "任务已创建，请查看任务队列"
+                }
+
             } catch (error: Exception) {
-                runOnUiThread { if (!isDestroyed) status.text = error.message ?: "任务创建失败" }
-            } finally {
-                taskCreation.set(false); runOnUiThread { if (!isDestroyed) sendButton?.isEnabled = true }
+                taskCreation.set(false)
+                runOnUiThread { if (!isDestroyed) {
+                    sendButton?.isEnabled = true
+                    if (connection.scope == gateway.reviewScope()) status.text = error.message ?: "任务创建失败"
+                } }
             }
         }
     }
+    private fun renderQueue() {
+        val target = queueView ?: return
+        target.removeAllViews()
+        if (queueScope != gateway.reviewScope()) queueSnapshot = JSONArray()
+        val dispatchPaused = gateway.prefs.getBoolean("queue_dispatch_paused", false)
+        if (queueSnapshot.length() == 0 && !dispatchPaused) { target.visibility = View.GONE; return }
+        target.visibility = View.VISIBLE
+        target.addView(UiTheme.text(this, "任务队列 · ${queueSnapshot.length()}", 13f, UiTheme.muted, true))
+        if (dispatchPaused) target.addView(UiTheme.command(this, "恢复队列调度") {
+            try {
+                check(gateway.prefs.edit().putBoolean("queue_dispatch_paused", false).commit())
+                check(TaskControl.wakeQueue(this))
+                status.text = "队列已恢复；暂停中的任务需单独继续"
+                renderQueue(); refreshRun()
+            } catch (_: Exception) { status.text = "队列尚未启动，请检查执行权限后重试" }
+        })
+        for (i in 0 until queueSnapshot.length()) {
+            val run = queueSnapshot.optJSONObject(i) ?: continue
+            val id = run.optString("id")
+            val queued = run.optString("status") == "queued"
+            val state = if (queued) TaskPresentation.queueLabel(run) else TaskPresentation.title(run.optString("status"))
+            val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+            row.addView(UiTheme.row(this, run.optString("title").ifBlank { run.optString("goal") },
+                TaskPresentation.withSourceLabel(run, state), UiIcons.play) {
+                startActivity(Intent(this, TaskPanelActivity::class.java).putExtra("run_id", id))
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            row.addView(UiTheme.command(this, if (queued) "取消排队" else "结束任务") {
+                val scope = queueScope
+                if (scope != gateway.reviewScope() || !cancellingQueued.add(id)) return@command
+                renderQueue()
+                TaskControl.request(this, id, "cancel") { response, error ->
+                    cancellingQueued.remove(id)
+                    if (!isDestroyed && visible && scope == gateway.reviewScope()) {
+                        if (response == null) status.text = error ?: "取消尚未确认"
+                        else {
+                            DeviceWorkerService.instance?.acceptEndedRun(response)
+                            if (latestRun?.optString("id") == id) displayRun(response)
+                        }
+                        renderQueue(); refreshRun()
+                    }
+                }
+            }.apply { isEnabled = id !in cancellingQueued }, LinearLayout.LayoutParams(-2, dp(44)))
+            target.addView(row)
+        }
+        target.addView(UiTheme.divider(this))
+    }
     private fun refreshRun() {
-        if (!FirstUseConsent.isAccepted(this)) return
+        if (!FirstUseConsent.isAccepted(this) || section != "任务" || polling) return
         reconcileSubmittedDraft()
-        sendButton?.isEnabled = !creating && !classifying
-        var voicePending = gateway.prefs.getString("voice_pending_worker_run", "").orEmpty()
-        val active = gateway.prefs.getString("active_run", "").orEmpty()
-        if (voicePending.isNotBlank() && active.isNotBlank() && voicePending != active) {
-            gateway.prefs.edit().remove("voice_pending_worker_run").remove("voice_pending_worker_generation").apply()
-            voicePending = ""
-        }
-        if ((section != "任务" && pendingWorkerRun.get() == null && voicePending.isBlank()) || polling) return
-        val id = active.ifBlank { voicePending }.ifBlank {
-            if (freshConversation) "" else gateway.selectedConversationRun() ?: runCatching { JSONObject(gateway.prefs.getString("last_result", "{}").orEmpty()).optString("id") }.getOrDefault("").ifBlank { latestRun?.optString("id").orEmpty() }
-        }
-        if (id.isEmpty()) return
-        val generation = TaskControl.currentGeneration()
+        sendButton?.isEnabled = !creating && !classifying && !attachments.processing()
+        val id = if (freshConversation) "" else gateway.selectedConversationRun().orEmpty()
+        val connection = gateway.captureReviewConnection()
         val conversation = gateway.conversationKey()
         polling = true
         io.execute {
-            try { val run = gateway.request("GET", "/runs/$id")
-                runCatching { gateway.request("GET", "/runs/$id/conversation").optJSONArray("items") }.getOrNull()?.let { run.put("conversation_items", it) }
-                check(run.optString("id") == id) { "Task response does not match requested run" }
-                val recent = eventFeed.refresh(id) { after -> gateway.request("GET", "/runs/$id/events?after=$after").optJSONArray("items") }
+            try {
+                val queue = if (connection.deviceId.isBlank()) JSONArray() else
+                    connection.request("GET", "/devices/${connection.deviceId}/queue").optJSONArray("items") ?: JSONArray()
+                val run = if (id.isBlank()) null else connection.request("GET", "/runs/$id").also { value ->
+                    check(value.optString("id") == id) { "Task response does not match requested run" }
+                    runCatching { connection.request("GET", "/runs/$id/conversation").optJSONArray("items") }.getOrNull()?.let { value.put("conversation_items", it) }
+                }
+                val recent = if (run == null) null else eventFeed.refresh(id) { after -> connection.request("GET", "/runs/$id/events?after=$after").optJSONArray("items") }
                 runOnUiThread {
-                    if (!visible || isFinishing || isDestroyed || !TaskControl.isCurrent(generation) || conversation != gateway.conversationKey()) return@runOnUiThread
-                    val current = gateway.prefs.getString("active_run", "").orEmpty()
-                    val terminalVoice = current.isBlank() && gateway.prefs.getString("voice_pending_worker_run", "") == id &&
-                        run.optString("status") in setOf("completed", "failed", "cancelled")
-                    val terminalReceipt = current.isBlank() && !freshConversation && TaskPresentation.terminal(run.optString("status"))
-                    if (current != id && !terminalVoice && !terminalReceipt) return@runOnUiThread
-                    runEvents = recent; eventsRunId = id
-                    if (section == "任务" && (current == id || terminalReceipt)) displayRun(run)
-                    startCreatedWorker(run)
-            } }
-            catch (_: Exception) { runOnUiThread { if (!isDestroyed) status.text = "任务状态暂不可用" } }
+                    if (!visible || isFinishing || isDestroyed || connection.scope != gateway.reviewScope() || conversation != gateway.conversationKey()) return@runOnUiThread
+                    queueScope = connection.scope; queueSnapshot = queue; renderQueue()
+                    if (run != null && !freshConversation && gateway.selectedConversationRun() == id) {
+                        runEvents = recent; eventsRunId = id; displayRun(run); startCreatedWorker(run)
+                    }
+                }
+            } catch (_: Exception) { runOnUiThread { if (!isDestroyed && visible) status.text = "任务状态暂不可用" } }
             finally { polling = false }
         }
     }
@@ -612,7 +825,7 @@ open class ClientActivity : Activity() {
         if (voicePending && run.optString("status") != "running") return
         if (!visible || isFinishing || isDestroyed || workerStartDeferred || gateway.prefs.getString("active_run", "") != id) return
         try {
-            if (!TaskControl.startWorker(this, generation)) return
+            if (!TaskControl.wakeQueue(this, generation)) return
             if (pending == id) pendingWorkerRun.compareAndSet(pending, null)
             if (voicePending) gateway.prefs.edit().remove("voice_pending_worker_run").remove("voice_pending_worker_generation").apply()
         } catch (_: IllegalStateException) { workerStartDeferred = true; status.text = "服务未启动，请返回任务页重试" }
@@ -620,12 +833,13 @@ open class ClientActivity : Activity() {
     }
     private fun reconcileSubmittedDraft() {
         val submitted = submittedDraft.get() ?: return
-        if (gateway.prefs.getString("active_run", "") != submitted.first) return
         val field = goal ?: return
         synchronized(draftLock) {
             if (gateway.prefs.getString("draft_goal", "").isNullOrBlank() && field.text.toString().trim() == submitted.second) field.setText("")
         }
         submittedDraft.compareAndSet(submitted, null)
+        attachments.refresh()
+        refreshEditBanner()
     }
     private fun displayRun(run: JSONObject) {
         latestRun = run
@@ -636,35 +850,58 @@ open class ClientActivity : Activity() {
         runTitle?.text = "Doppel · ${TaskPresentation.withSourceLabel(run, TaskPresentation.title(state))}"
         runTitle?.setTextColor(when (state) { "failed" -> UiTheme.danger; "running", "completed" -> UiTheme.green; else -> UiTheme.ink })
         runGoal?.text = run.optString("goal")
-        taskProgress?.display(run, state == "running" && DeviceWorkerService.instance?.isPaused != false)
+        runGoal?.let { bindMessageMenu(it, "task", run.optString("id"), true) }
+        runView?.let { bindMessageMenu(it) }
+        runVersions?.let { versions ->
+            val stamp = run.optString("id") + displayedVersionGroups.toString()
+            if (versions.tag != stamp) { versions.tag = stamp; versions.removeAllViews(); appendVersionPicker(versions, "task", run.optString("id")) }
+        }
+        runAttachments?.let { view ->
+            val refs = run.optJSONArray("attachments")
+            if (view.tag != refs?.toString().orEmpty()) {
+                view.tag = refs?.toString().orEmpty(); view.removeAllViews(); attachments.append(view, refs)
+            }
+        }
+        taskProgress?.display(run, state == "running" && gateway.prefs.getString("active_run", "") == run.optString("id") && DeviceWorkerService.instance?.isPaused != false)
         runView?.apply {
-            val locallyPaused = DeviceWorkerService.instance?.isPaused != false
+            val locallyPaused = gateway.prefs.getString("active_run", "") == run.optString("id") && DeviceWorkerService.instance?.isPaused != false
             text = TaskPresentation.detail(PauseDetails.resolve(this@ClientActivity, run, locallyPaused), locallyPaused)
             visibility = if (text.isBlank()) View.GONE else View.VISIBLE
         }
         val process = TaskPresentation.process(runEvents.takeIf { eventsRunId == run.optString("id") }, run.optString("message"))
         runProcess?.apply { text = "执行过程\n" + process.joinToString("\n") { "· $it" }; visibility = if (process.isEmpty()) View.GONE else View.VISIBLE }
         status.text = connectionSummary()
-        runProgress?.visibility = if (state in setOf("running", "queued")) View.VISIBLE else View.GONE
+        runProgress?.visibility = if (state == "running") View.VISIBLE else View.GONE
         taskActions?.visibility = if (state in setOf("running", "queued", "paused", "awaiting_input", "awaiting_approval")) View.VISIBLE else View.GONE
-        val localPaused = DeviceWorkerService.instance?.isPaused != false
-        runProgress?.active = state == "queued" || state == "running" && !localPaused
+        val owner = gateway.prefs.getString("active_run", "") == run.optString("id")
+        val localPaused = owner && DeviceWorkerService.instance?.isPaused != false
+        runProgress?.active = state == "running" && !localPaused
         if (state == "running" && localPaused) runProgress?.visibility = View.GONE
         taskActions?.let { actions ->
             actions.getChildAt(0).visibility = if (state == "running" && !localPaused) View.VISIBLE else View.GONE
             actions.getChildAt(1).visibility = if (state == "paused" || state == "running" && localPaused) View.VISIBLE else View.GONE
+            (actions.getChildAt(2) as? Button)?.text = if (state == "queued") "取消排队" else "停止任务"
         }
         if (state == "running" && localPaused) runTitle?.text = "Doppel · ${TaskPresentation.withSourceLabel(run, "已暂停")}"
-        reviewAction?.visibility = if (state in setOf("completed", "failed", "cancelled")) View.VISIBLE else View.GONE
-        if (state == "paused") DeviceWorkerService.instance?.suspendLocallyPreservingPauseNotice(true)
-        if (state in setOf("cancelled", "completed", "failed")) DoppelAccessibilityService.instance?.setTouchGuard(false)
-        val pending = run.optJSONObject("pending_request")
+        val display = PauseDetails.resolve(this, run, localPaused)
+        val pending = display.optJSONObject("pending_request")
         if (pending == null) { runControls?.removeAllViews(); lastPending = ""; return }
-        if (pending.optString("id") == lastPending) return
-        lastPending = pending.optString("id"); runControls?.removeAllViews()
+        val pendingIdentity = display.optString("status") + ":" + pending.toString()
+        if (pendingIdentity == lastPending) return
+        lastPending = pendingIdentity; runControls?.removeAllViews()
         val controls = runControls ?: return
         controls.addView(UiTheme.text(this, pending.optString("message"), 15f).apply { setPadding(0, dp(16), 0, dp(12)) })
-        if (state == "paused" && pending.optBoolean("manual_only")) return
+        if (PausePresentation.from(display)?.showLoginSettings == true) controls.addView(UiTheme.command(this, "设置登录方式") {
+            val current = latestRun?.takeIf { it.optString("id") == run.optString("id") } ?: return@command
+            if (gateway.prefs.getString("active_run", "") != current.optString("id")) return@command
+            val stopped = PauseDetails.resolve(this, current, DeviceWorkerService.instance?.isPaused != false)
+            if (PausePresentation.from(stopped)?.showLoginSettings != true) return@command
+            val open = Intent(this, LoginSettingsActivity::class.java)
+            stopped.optJSONObject("pending_request")?.optString("package_name")
+                ?.takeIf { it.isNotBlank() && it != packageName }?.let { open.putExtra("package_name", it) }
+            startActivity(open)
+        }, LinearLayout.LayoutParams(-1, dp(46)).apply { topMargin = dp(8) })
+        if (display.optString("status") == "paused") return
         val answer = UiTheme.field(this, "补充信息")
         if (pending.optString("kind") == "input") controls.addView(answer)
         val choices = if (pending.optString("kind") == "approval") listOf("批准", "拒绝") else listOf("提交")
@@ -691,13 +928,18 @@ open class ClientActivity : Activity() {
                 if (item.optString("after_run_id") != after) continue
                 val text = item.optString("content").trim(); if (text.isBlank()) continue
                 val user = item.optString("role") == "user"
+                val turnId = item.optString("turn_id").ifBlank { item.optString("request_id") }
+                val deleted = item.optBoolean("deleted")
                 rows.addView(UiTheme.text(this, text, 15f, if (user) UiTheme.ink else UiTheme.muted).apply {
-                    setLineSpacing(dp(3).toFloat(), 1f); setTextIsSelectable(true); setPadding(dp(15), dp(11), dp(15), dp(11))
+                    setLineSpacing(dp(3).toFloat(), 1f); setPadding(dp(15), dp(11), dp(15), dp(11))
                     if (user) background = UiTheme.glass(this@ClientActivity, 18)
+                    if (!deleted) bindMessageMenu(this, "chat", turnId, user)
                 }, LinearLayout.LayoutParams(if (user) -2 else -1, -2).apply {
                     gravity = if (user) Gravity.END else Gravity.START
                     marginStart = if (user) dp(34) else 0; marginEnd = if (user) 0 else dp(18); topMargin = dp(8); bottomMargin = dp(4)
                 })
+                if (user || deleted) appendVersionPicker(rows, if (deleted) "task" else "chat", turnId)
+                attachments.append(rows, item.optJSONArray("attachments"))
             }
         }
         discussion("")
@@ -706,9 +948,12 @@ open class ClientActivity : Activity() {
             if (entry.optString("id") == run.optString("id")) continue
             val bubble = UiTheme.text(this, entry.optString("goal"), 16f).apply {
                 background = UiTheme.glass(this@ClientActivity, 18); setPadding(dp(16), dp(12), dp(16), dp(12))
+                bindMessageMenu(this, "task", entry.optString("id"), true)
             }
             rows.addView(bubble, LinearLayout.LayoutParams(-2, -2).apply { gravity = Gravity.END; marginStart = dp(32); topMargin = dp(12) })
-            rows.addView(UiTheme.text(this, entry.optString("message"), 16f).apply { setTextIsSelectable(true) },
+            appendVersionPicker(rows, "task", entry.optString("id"))
+            attachments.append(rows, entry.optJSONArray("attachments"))
+            rows.addView(UiTheme.text(this, entry.optString("message"), 16f).apply { bindMessageMenu(this) },
                 LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(16); bottomMargin = dp(24) })
             discussion(entry.optString("id"))
             rows.addView(UiTheme.divider(this))
@@ -759,12 +1004,18 @@ open class ClientActivity : Activity() {
         settingsSwitch("触屏暂停", "touch_pause") { checked -> if (!checked) DoppelAccessibilityService.instance?.setTouchGuard(false) }
         settingsSwitch("自动播报结果", "completion_speech") {}
         settingsRow("离线中文语音识别", "内置中文模型 · 无需联网", android.R.drawable.ic_btn_speak_now) { startActivity(Intent(this, SpeechSettingsActivity::class.java)) }
-        settingsRow("登录设置", "登录资料与验证码", android.R.drawable.ic_lock_lock) { startActivity(Intent(this, LoginSettingsActivity::class.java)) }
-        settingsRow("密码管理", "使用 4 位 PIN 保护登录资料", UiIcons.lock) { startActivity(Intent(this, PasswordSettingsActivity::class.java)) }
+        settingsRow("长期记忆", "聊天中的纠错与偏好 · 可编辑和删除", UiIcons.edit) { startActivity(Intent(this, LongTermMemoryActivity::class.java)) }
+        settingsRow("登录设置", "账号密码或短信验证码 · 4 位 PIN 保护", UiIcons.lock) { startActivity(Intent(this, LoginSettingsActivity::class.java)) }
         settingsRow("视觉增强", "在模型设置中选择独立视觉模型", UiIcons.scan) { startActivity(Intent(this, ModelSettingsActivity::class.java)) }
         settingsRow("支付授权", if (PaymentConsent(this).isEnabledForSettings()) "允许代为支付" else "未开启，付款由你确认", android.R.drawable.ic_lock_lock) { startActivity(Intent(this, PaymentSettingsActivity::class.java)) }
         sectionLabel("扩展与数据")
-            settingsRow("扩展与 Skills", "服务连接、导入与工具权限", UiIcons.connection) { startActivity(Intent(this, ExtensionSettingsActivity::class.java)) }
+        settingsRow("账号与服务器", "登录账号、管理服务器连接与密码", UiIcons.account) {
+            startActivity(Intent(this, CloudAccountActivity::class.java))
+        }
+        settingsRow("PC 连接", "在同一网络中连接电脑，由手机完成操作", UiIcons.connection) {
+            startActivity(Intent(this, PcConnectionActivity::class.java))
+        }
+            settingsRow("扩展服务", "服务连接与工具权限", UiIcons.connection) { startActivity(Intent(this, ExtensionSettingsActivity::class.java)) }
             settingsRow("自动触发", "出现指定控件时执行任务或动作", UiIcons.scan) { startActivity(Intent(this, AutoTriggerSettingsActivity::class.java)) }
         settingsRow("定时任务", "安排稍后执行的手机任务", UiIcons.history) { startActivity(Intent(this, ScheduleActivity::class.java)) }
         settingsRow("数据保存设置", "任务截图保留时间", android.R.drawable.ic_menu_recent_history) {
@@ -807,6 +1058,7 @@ open class ClientActivity : Activity() {
     @Deprecated("Platform callback") override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (!trustedInstallation) return
+        if (attachments.result(requestCode, resultCode, data)) return
         if (requestCode == 70) {
             onboardingOpen = false
             if (resultCode != RESULT_OK || !FirstUseConsent.isAccepted(this)) { finishAndRemoveTask(); return }
@@ -824,7 +1076,7 @@ open class ClientActivity : Activity() {
             repeat(chats.length()) { index ->
                 val chat = chats.getJSONObject(index)
                 settingsRow(chat.optString("title").ifBlank { "未命名对话" }, "继续对话", UiIcons.account) {
-                    if (creating || classifying) { status.text = "正在处理消息，请稍候"; return@settingsRow }
+                    if (creating || classifying || attachments.processing()) { status.text = "正在处理消息或附件，请稍候"; return@settingsRow }
                     val active = gateway.prefs.getString("active_run", "").orEmpty()
                     if (active.isNotBlank() && active != chat.optString("tail")) { status.text = "请先结束当前任务，再切换对话"; return@settingsRow }
                     gateway.selectConversation(chat.getString("key"))
@@ -856,7 +1108,7 @@ open class ClientActivity : Activity() {
     private fun runHistoryMenu(run: JSONObject) {
         val id = run.getString("id")
         val displayTitle = run.optString("title").ifBlank { run.optString("goal") }.ifBlank { "未命名任务" }
-        UiDialog.Builder(this).setTitle(displayTitle).setItems(arrayOf("任务过程", "对话记录", "复盘与纠错", "截图", "删除任务")) { _, choice ->
+        UiDialog.Builder(this).setTitle(displayTitle).setItems(arrayOf("任务过程", "打开对话", "截图", "删除任务")) { _, choice ->
             when(choice) {
                 0 -> async({ JSONObject().put("run", gateway.request("GET", "/runs/$id")).put("items", TaskEventFeed().refresh(id) { after -> gateway.request("GET", "/runs/$id/events?after=$after").optJSONArray("items") }) }) { events ->
                     val list = events.optJSONArray("items")
@@ -869,10 +1121,9 @@ open class ClientActivity : Activity() {
                     }
                     UiDialog.Builder(this).setTitle("任务过程").setView(ScrollView(this).apply { addView(content) }).setPositiveButton("关闭", null).show()
                 }
-                1 -> showConversation(id)
-                2 -> openReview(run)
-                3 -> screenshotList(id)
-                4 -> UiDialog.Builder(this).setTitle("删除任务和截图？").setMessage(run.optString("goal")).setNegativeButton("返回", null).setPositiveButton("删除") { _, _ ->
+                1 -> openTaskChat(run)
+                2 -> screenshotList(id)
+                3 -> UiDialog.Builder(this).setTitle("删除任务和截图？").setMessage(run.optString("goal")).setNegativeButton("返回", null).setPositiveButton("删除") { _, _ ->
                     async({ val result = gateway.request("DELETE", "/runs/$id"); ResultStore(this).use { it.erase(id) }; PauseDetails.clear(this, id); gateway.clearDocumentCache(); result }) {
                         synchronized(gateway.prefs) {
                             val edit = gateway.prefs.edit()
@@ -897,180 +1148,17 @@ open class ClientActivity : Activity() {
         page.addView(block); page.addView(UiTheme.divider(this))
     }
 
-    private fun showConversation(runId: String) {
-        async({
-            val response = gateway.request("GET", "/runs/$runId/conversation")
-            // Include the event feed in this view so users do not have to switch
-            // between two dialogs to reconstruct what happened.  Older gateways
-            // may not expose events, therefore this remains best-effort.
-            runCatching { response.put("_events", gateway.request("GET", "/runs/$runId/events").optJSONArray("items")) }
-            response
-        }) { response ->
-            val items = response.optJSONArray("items")
-            val transcript = buildString {
-                val discussion = ConversationChatContext.merge(items ?: JSONArray(), gateway.conversationMessagesForRun(runId), Int.MAX_VALUE)
-                for (i in 0 until discussion.length()) {
-                    val item = discussion.getJSONObject(i)
-                    append(if (item.optString("role") == "user") "用户：" else "Doppel：").append(item.optString("content")).append("\n")
-                    append("\n")
-                }
-                val events = response.optJSONArray("_events")
-                if (events != null && events.length() > 0) {
-                    append("执行过程：\n")
-                    for (i in 0 until events.length()) {
-                        val event = events.optJSONObject(i) ?: continue
-                        val message = event.optString("message").trim()
-                        if (message.isNotBlank()) append("· ").append(message).append("\n")
-                    }
-                }
-            }.trim()
-            val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(2), 0, 0) }
-            val history = UiTheme.text(this, transcript.ifBlank { "暂无对话内容" }, 14f, UiTheme.muted).apply {
-                setTextIsSelectable(true); setPadding(dp(2), dp(4), dp(2), dp(12))
-            }
-            box.addView(ScrollView(this).apply { isFillViewport = true; addView(history) },
-                LinearLayout.LayoutParams(-1, dp(230)))
-            box.addView(UiTheme.divider(this), LinearLayout.LayoutParams(-1, dp(1)).apply { bottomMargin = dp(8) })
-            box.addView(UiTheme.text(this, "对这次任务追问（不会再次操作手机）", 12f, UiTheme.ink, true).apply { setPadding(0, dp(4), 0, dp(4)) })
-            val question = UiTheme.field(this, "例如：为什么在章节选择时走错了？").apply { minLines = 1; maxLines = 3; gravity = Gravity.TOP }
-            box.addView(question)
-            val ask = UiTheme.command(this, "询问 AI") { }
-            box.addView(ask, LinearLayout.LayoutParams(-1, dp(42)).apply { topMargin = dp(6) })
-            val dialog = UiDialog.Builder(this).setTitle("任务对话与复盘").setView(box).setNegativeButton("关闭", null).create()
-            ask.setOnClickListener {
-                val prompt = question.text.toString().trim()
-                if (prompt.isBlank()) { question.error = "请输入想了解的问题"; return@setOnClickListener }
-                ask.isEnabled = false; ask.text = "正在分析…"
-                io.execute {
-                    val answer = runCatching {
-                        gateway.request("POST", "/runs/$runId/review", JSONObject().put("question", prompt))
-                    }
-                    runOnUiThread {
-                        if (isDestroyed || !dialog.isShowing) return@runOnUiThread
-                        ask.isEnabled = true; ask.text = "询问 AI"
-                        answer.onSuccess { payload ->
-                            val text = reviewAnswer(payload)
-                            history.text = (history.text.toString().trim() + "\n\nAI 复盘：\n" + text).trim()
-                        }.onFailure { question.error = it.message ?: "复盘服务暂不可用" }
-                    }
-                }
-            }
-            dialog.show()
-        }
+    private fun openTaskChat(run: JSONObject) {
+        runCatching {
+            saveDraft()
+            gateway.selectTaskConversation(run)
+            freshConversation = false
+            latestRun = null
+            selectSection("任务")
+            goal?.requestFocus()
+        }.onFailure { status.text = it.message ?: "对话未能打开" }
     }
 
-    /** Convert the review endpoint's structured result into a compact, readable reply. */
-    private fun reviewAnswer(payload: JSONObject): String {
-        val lines = mutableListOf<String>()
-        payload.optString("answer").trim().takeIf { it.isNotBlank() }?.let { lines += it }
-        val analysis = payload.optJSONObject("analysis")
-        fun addList(title: String, value: org.json.JSONArray?) {
-            if (value == null || value.length() == 0) return
-            val entries = (0 until minOf(value.length(), 6)).mapNotNull { value.optString(it).trim().takeIf(String::isNotBlank) }
-            if (entries.isNotEmpty()) lines += title + "：\n" + entries.joinToString("\n") { "· $it" }
-        }
-        addList("可能原因", analysis?.optJSONArray("failure_causes") ?: payload.optJSONArray("failure_causes"))
-        addList("关键步骤", analysis?.optJSONArray("key_steps") ?: payload.optJSONArray("key_steps"))
-        addList("改进建议", analysis?.optJSONArray("improvements") ?: payload.optJSONArray("improvements"))
-        if (lines.isEmpty()) payload.optString("message").trim().takeIf { it.isNotBlank() }?.let { lines += it }
-        if (lines.isEmpty()) payload.optJSONArray("choices")?.optJSONObject(0)
-            ?.optJSONObject("message")?.optString("content")?.trim()
-            ?.takeIf { it.isNotBlank() }?.let { lines += it }
-        return lines.joinToString("\n\n").ifBlank { "AI 没有返回可用的复盘说明。" }
-    }
-
-    /** Shows the run timeline and lets the user record a concrete correction. */
-    private fun openReview(run: JSONObject) {
-        val runId = run.optString("id")
-        if (runId.isBlank()) return
-        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(4), 0, 0) }
-        val state = mapOf("completed" to "已完成", "failed" to "未完成", "cancelled" to "已取消")[run.optString("status")] ?: run.optString("status")
-        box.addView(UiTheme.text(this, "结果：$state", 14f, if (run.optString("status") == "completed") UiTheme.green else UiTheme.danger, true))
-        val result = run.optString("message").trim().ifBlank { "任务没有留下结果说明。" }
-        box.addView(UiTheme.text(this, result, 14f, UiTheme.muted).apply { setPadding(0, dp(8), 0, dp(10)); setTextIsSelectable(true) })
-        val timeline = UiTheme.text(this, "正在读取执行时间线…", 13f, UiTheme.muted).apply { setTextIsSelectable(true); setPadding(0, dp(4), 0, dp(12)) }
-        box.addView(timeline)
-        val reviews = TaskReviewStore(this)
-        val scope = gateway.reviewScope()
-        val savedNotes = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        box.addView(savedNotes)
-        box.addView(UiTheme.text(this, "告诉 AI 下次要注意什么（可选）", 13f, UiTheme.ink, true).apply { setPadding(0, dp(12), 0, dp(5)) })
-        val correction = UiTheme.field(this, "例如：进入章节时先点“乐章收录”，不要点底部导航图标").apply { minLines = 2; maxLines = 5; gravity = Gravity.TOP; setPadding(dp(8), dp(8), dp(8), dp(8)) }
-        box.addView(correction)
-        val dialog = UiDialog.Builder(this).setTitle("任务复盘").setView(box)
-            .setNeutralButton("询问 AI") { _, _ -> showConversation(runId) }
-            .setNegativeButton("关闭", null).setPositiveButton("保存纠错", null).create()
-        lateinit var refreshNotes: () -> Unit
-        fun sendNote(item: JSONObject, verify: Boolean = false) {
-            val id = item.getString("id")
-            io.execute {
-                val result = runCatching {
-                    if (verify) reviews.verify(id, gateway) else reviews.submit(id, gateway) {
-                        runOnUiThread { if (!isDestroyed && dialog.isShowing) refreshNotes() }
-                    }
-                }
-                runOnUiThread {
-                    if (isDestroyed || !dialog.isShowing) return@runOnUiThread
-                    refreshNotes()
-                    result.onFailure { correction.error = it.message ?: "保存状态暂不可用，原纠错仍保留在本机" }
-                }
-            }
-        }
-        refreshNotes = {
-            savedNotes.removeAllViews()
-            runCatching { reviews.forRun(runId, scope) }.onSuccess { previous ->
-                if (previous.isNotEmpty()) savedNotes.addView(UiTheme.text(this, "本机纠错与记忆状态", 13f, UiTheme.ink, true))
-                previous.forEach { item ->
-                    savedNotes.addView(UiTheme.text(this, "· ${item.optString("note")}", 13f, UiTheme.muted).apply {
-                        setPadding(0, dp(8), 0, dp(4)); setTextIsSelectable(true)
-                    })
-                    savedNotes.addView(UiTheme.text(this, TaskReviewStore.stateLabel(item), 12f, UiTheme.muted))
-                    item.optString("sync_error").takeIf { it.isNotBlank() }?.let {
-                        savedNotes.addView(UiTheme.text(this, it, 12f, UiTheme.muted))
-                    }
-                    val sync = item.optString("sync_state")
-                    if (sync != "saved") {
-                        val label = when (sync) { "local", "failed" -> "重试加入记忆"; "pending" -> "刷新保存状态"; else -> "核对保存结果" }
-                        val retry = UiTheme.command(this, label) { }
-                        retry.setOnClickListener {
-                            retry.isEnabled = false
-                            if (sync == "pending") refreshNotes() else sendNote(item, verify = sync !in setOf("local", "failed"))
-                        }
-                        savedNotes.addView(retry)
-                    }
-                }
-            }.onFailure { savedNotes.addView(UiTheme.text(this, it.message ?: "复盘记录无法读取", 13f, UiTheme.danger)) }
-        }
-        refreshNotes()
-        dialog.setOnShowListener {
-            dialog.getButton(DialogInterface.BUTTON_POSITIVE).setOnClickListener {
-                val note = correction.text.toString().trim()
-                if (note.isBlank()) { correction.error = "请写下需要记住的纠错"; return@setOnClickListener }
-                runCatching { reviews.add(runId, run.optString("goal"), note, run.optString("status"), scope) }
-                    .onSuccess { item ->
-                        correction.setText(""); correction.error = null
-                        refreshNotes()
-                        if (item.optString("sync_state") in setOf("local", "failed")) sendNote(item)
-                    }
-                    .onFailure { correction.error = it.message ?: "保存失败" }
-            }
-        }
-        dialog.show()
-        async({
-            val events = eventFeed.refresh(runId) { after -> gateway.request("GET", "/runs/$runId/events?after=$after").optJSONArray("items") }
-            JSONObject().put("events", events)
-        }) { payload ->
-            val events = payload.optJSONArray("events")
-            val lines = mutableListOf<String>()
-            if (events != null) for (i in 0 until events.length()) {
-                val event = events.optJSONObject(i) ?: continue
-                val message = event.optString("message").trim()
-                if (message.isNotBlank()) lines += message
-            }
-            val text = lines.takeLast(16).joinToString("\n") { "· $it" }.ifBlank { "暂无执行事件" }
-            timeline.text = "执行时间线\n$text"
-        }
-    }
     private fun screenshotList(run: String) {
         async({ gateway.request("GET", "/runs/$run/screenshots") }) { response ->
             val items = response.optJSONArray("items")
@@ -1129,12 +1217,13 @@ open class ClientActivity : Activity() {
         ThemeController.refreshSystem(this)
         if (!FirstUseConsent.isAccepted(this) || FirstUseConsent.needsGuide(this)) { visible = false; openFirstUse(); return }
         visible = true; workerStartDeferred = false; goal?.setText(gateway.prefs.getString("draft_goal", ""))
+        attachments.refresh()
         if (section == "设置") render()
         status.text = connectionSummary(); handler.post(poll)
     }
     @Deprecated("Platform callback") override fun onBackPressed() { if (section != "任务") selectSection("任务") else super.onBackPressed() }
     override fun onSaveInstanceState(outState: Bundle) {
-        if (trustedInstallation) { saveDraft(); outState.putString("section", section); outState.putBoolean("onboarding_open", onboardingOpen); outState.putBoolean("fresh_conversation", freshConversation) }
+        if (trustedInstallation) { saveDraft(); attachments.save(outState); outState.putString("section", section); outState.putBoolean("onboarding_open", onboardingOpen); outState.putBoolean("fresh_conversation", freshConversation) }
         super.onSaveInstanceState(outState)
     }
     override fun onPause() { visible = false; handler.removeCallbacks(poll); if (trustedInstallation) saveDraft(); super.onPause() }

@@ -9,11 +9,24 @@ class SplitOutputSchemaTest {
     private fun wrapped(value: JSONObject, role: String = "primary") = if (role == "grounding") JSONObject().put("result", value)
         else JSONObject().put("decision", value).put("state", JSONObject.NULL)
     private fun tap() = JSONObject().put("kind", "tap").put("target", "保存按钮").put("expected", "文件保存").put("screen_context", "编辑页")
+        .put("request_login_code", JSONObject.NULL)
     private fun groundingTap() = JSONObject().put("status", "located").put("action", "tap").put("points", JSONArray("[[450,120]]"))
         .put("duration_ms", 60).put("assessment", JSONObject().put("alignment", "consistent"))
     private fun response(value: JSONObject) = JSONObject().put("choices", JSONArray().put(JSONObject()
         .put("finish_reason", "stop").put("message", JSONObject().put("content", value.toString()))))
     private fun replacementState() = JSONObject().put("phase", "navigating").put("remaining_steps", JSONArray().put("找到目标关卡"))
+    private fun legacySwipeFormat(): JSONObject = SplitOutputSchema.format("primary").apply {
+        getJSONObject("json_schema").put("name", "doppel_a_ab_v8")
+        val branches = getJSONObject("json_schema").getJSONObject("schema").getJSONObject("properties").getJSONObject("decision").getJSONArray("anyOf")
+        repeat(branches.length()) { index ->
+            val branch = branches.getJSONObject(index)
+            if (branch.getJSONObject("properties").has("start_hold_ms")) {
+                branch.getJSONObject("properties").remove("start_hold_ms")
+                val required = branch.getJSONArray("required")
+                branch.put("required", JSONArray((0 until required.length()).map(required::getString).filterNot { it == "start_hold_ms" }))
+            }
+        }
+    }
 
     @Test fun schemasAreStrictClosedObjectsAndActionSpecific() {
         for (format in listOf(SplitOutputSchema.format("primary"), SplitOutputSchema.format("primary", true), SplitOutputSchema.format("grounding", expectedAction = "swipe"))) {
@@ -57,6 +70,43 @@ class SplitOutputSchemaTest {
         SplitOutputSchema.validate(wrapped(tap().put("points", JSONArray("[[10,20]]")).put("duration_ms", 60)), format)
     }
 
+    @Test fun loginSmsRequestIsRequiredNullablePlannerTapMetadataAndNeverGrounderAuthority() {
+        for (direct in listOf(false, true)) {
+            val format = SplitOutputSchema.format("primary", direct)
+            fun decision() = tap().apply { if (direct) put("points", JSONArray("[[10,20]]")).put("duration_ms", 60) }
+            for (flag in listOf(true, false, JSONObject.NULL))
+                SplitOutputSchema.validate(wrapped(decision().put("request_login_code", flag)), format)
+            for (flag in listOf("true", 1, JSONObject()))
+                assertThrows(SplitSchemaViolation::class.java) { SplitOutputSchema.validate(wrapped(decision().put("request_login_code", flag)), format) }
+            assertThrows(SplitSchemaViolation::class.java) { SplitOutputSchema.validate(wrapped(decision().apply { remove("request_login_code") }), format) }
+            val nonTap = JSONObject().put("kind", "ask_user").put("message", "请选择登录账户").put("request_login_code", true)
+            assertThrows(SplitSchemaViolation::class.java) { SplitOutputSchema.validate(wrapped(nonTap), format) }
+        }
+        val grounder = SplitOutputSchema.format("grounding", expectedAction = "tap")
+        assertFalse(grounder.toString().contains("request_login_code"))
+        assertThrows(SplitSchemaViolation::class.java) {
+            SplitOutputSchema.validate(wrapped(groundingTap().put("request_login_code", true), "grounding"), grounder)
+        }
+    }
+
+    @Test fun typedReasonBelongsOnlyToExplicitManualTakeover() {
+        for (direct in listOf(false, true)) {
+            val format = SplitOutputSchema.format("primary", direct)
+            val decision = JSONObject().put("kind", "manual_takeover").put("message", "请选择登录方式")
+            for (reason in SplitAgentProtocol.takeoverReasons + JSONObject.NULL)
+                SplitOutputSchema.validate(wrapped(JSONObject(decision.toString()).put("reason", reason)), format)
+            assertThrows(SplitSchemaViolation::class.java) { SplitOutputSchema.validate(wrapped(decision), format) }
+            for (reason in listOf("other", "登录", true, 1))
+                assertThrows(SplitSchemaViolation::class.java) {
+                    SplitOutputSchema.validate(wrapped(JSONObject(decision.toString()).put("reason", reason)), format)
+                }
+            assertThrows(SplitSchemaViolation::class.java) {
+                SplitOutputSchema.validate(wrapped(JSONObject().put("kind", "ask_user").put("message", "选择哪个账户")
+                    .put("reason", "login")), format)
+            }
+        }
+    }
+
     @Test fun waitRequiresSpecificFreshEvidenceWithoutActionFields() {
         val decision = JSONObject().put("kind", "wait").put("duration_ms", 800).put("reason", "等待同步")
         val format = SplitOutputSchema.format("primary")
@@ -73,11 +123,11 @@ class SplitOutputSchemaTest {
     }
 
     @Test fun swipeDeclaresExtentAndGrounderCarriesOnlyCompactDirectionReview() {
-        val decision = tap().put("kind", "swipe").put("swipe_extent", "small").put("scroll_goal", "inspect").put("boundary_reason", "")
-            .put("gesture_semantics", "reveal_content").put("target_relative_direction", "right").put("intended_finger_direction", "left")
+        val decision = tap().apply { remove("request_login_code") }.put("kind", "swipe").put("swipe_extent", "small").put("scroll_goal", "inspect").put("boundary_reason", "")
+            .put("gesture_semantics", "reveal_content").put("target_relative_direction", "right").put("intended_finger_direction", "left").put("start_hold_ms", 0)
         val format = SplitOutputSchema.format("primary")
         SplitOutputSchema.validate(wrapped(decision), format)
-        for (key in listOf("swipe_extent", "scroll_goal", "target_relative_direction", "intended_finger_direction")) {
+        for (key in listOf("swipe_extent", "scroll_goal", "target_relative_direction", "intended_finger_direction", "start_hold_ms")) {
             assertThrows(IllegalArgumentException::class.java) { SplitOutputSchema.validate(wrapped(JSONObject(decision.toString()).apply { remove(key) }), format) }
         }
         val result = JSONObject().put("status", "located").put("action", "swipe").put("points", JSONArray("[[600,500],[500,500]]")).put("duration_ms", 900)
@@ -89,17 +139,22 @@ class SplitOutputSchemaTest {
     }
 
     @Test fun objectDragUsesExistingDirectionFieldsInStrictSingleAndSequenceSchemas() {
-        val decision = tap().put("kind", "swipe").put("swipe_extent", "small").put("scroll_goal", "inspect").put("boundary_reason", "")
-            .put("gesture_semantics", "object_drag").put("target_relative_direction", "unknown").put("intended_finger_direction", "up")
+        val decision = tap().apply { remove("request_login_code") }.put("kind", "swipe").put("swipe_extent", "small").put("scroll_goal", "inspect").put("boundary_reason", "")
+            .put("gesture_semantics", "object_drag").put("target_relative_direction", "unknown").put("intended_finger_direction", "up").put("start_hold_ms", 800)
         for (direct in listOf(false, true)) {
             val candidate = JSONObject(decision.toString())
             if (direct) candidate.put("points", JSONArray("[[800,800],[400,400]]")).put("duration_ms", 900)
             SplitOutputSchema.validate(wrapped(candidate), SplitOutputSchema.format("primary", direct))
+            for (invalid in listOf(-1, 3001, "800", 800.5, JSONObject.NULL)) {
+                assertThrows(SplitSchemaViolation::class.java) {
+                    SplitOutputSchema.validate(wrapped(JSONObject(candidate.toString()).put("start_hold_ms", invalid)), SplitOutputSchema.format("primary", direct))
+                }
+            }
         }
-        val sequence = tap().put("kind", "swipe_sequence").put("swipe_extent", "small").put("scroll_goal", "inspect").put("boundary_reason", "")
+        val sequence = tap().apply { remove("request_login_code") }.put("kind", "swipe_sequence").put("swipe_extent", "small").put("scroll_goal", "inspect").put("boundary_reason", "")
             .put("gesture_contracts", JSONArray()
-                .put(JSONObject().put("gesture_semantics", "object_drag").put("target_relative_direction", "unknown").put("intended_finger_direction", "up"))
-                .put(JSONObject().put("gesture_semantics", "physical_gesture").put("target_relative_direction", "unknown").put("intended_finger_direction", "right")))
+                .put(JSONObject().put("gesture_semantics", "object_drag").put("target_relative_direction", "unknown").put("intended_finger_direction", "up").put("start_hold_ms", 800))
+                .put(JSONObject().put("gesture_semantics", "physical_gesture").put("target_relative_direction", "unknown").put("intended_finger_direction", "right").put("start_hold_ms", 0)))
         SplitOutputSchema.validate(wrapped(sequence), SplitOutputSchema.format("primary"))
         val withoutFinger = JSONObject(decision.toString()).apply { remove("intended_finger_direction") }
         assertThrows(SplitSchemaViolation::class.java) { SplitOutputSchema.validate(wrapped(withoutFinger), SplitOutputSchema.format("primary")) }
@@ -129,9 +184,11 @@ class SplitOutputSchemaTest {
         // Exact content from regressions/map-ready-not-loading/response.json; no syntax or field repair.
         val raw = """{"decision":{"kind":"swipe","target":"当前关卡地图区域，手指由左向右小幅滑动，以露出左侧更早的关卡节点","expected":"画面内容向右移动，从而在屏幕左侧或中部暴露出编号更小的关卡（如1-7）","screen_context":"","swipe_extent":"small","scroll_goal":"inspect","boundary_reason":"","gesture_semantics":"reveal_content","target_relative_direction":"left","intended_finger_direction":"right"},"state":null}"""
         val response = JSONObject(raw)
-        val format = SplitOutputSchema.format("primary")
-        assertEquals("doppel_a_ab_v3", format.getJSONObject("json_schema").getString("name"))
+        val format = legacySwipeFormat()
+        assertThrows(SplitSchemaViolation::class.java) { SplitOutputSchema.validate(response, SplitOutputSchema.format("primary")) }
         SplitOutputSchema.validate(response, format)
+        val restored = SplitAgentProtocol.content(this.response(response), format, "primary")
+        assertEquals(0, DirectionalGestureContract.parsePlanner("swipe", restored).single().startHoldMs)
         val result = SplitOutputSchema.unwrap(response, "primary")
         assertEquals("execute", result.getString("kind")); assertEquals("swipe", result.getString("action"))
         assertEquals("right", result.getString("intended_finger_direction")); assertFalse(result.has("state"))
@@ -148,15 +205,15 @@ class SplitOutputSchemaTest {
         val response = JSONObject().put("choices", JSONArray().put(JSONObject().put("finish_reason", "stop")
             .put("message", JSONObject().put("content", raw))))
         val rejection = assertThrows(IllegalArgumentException::class.java) {
-            SplitAgentProtocol.content(response, SplitOutputSchema.format("primary"), "primary")
+            SplitAgentProtocol.content(response, legacySwipeFormat(), "primary")
         }
         assertTrue(rejection.message.orEmpty().contains("swipe_extent"))
         assertEquals(raw, response.getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content"))
 
-        // Changing just the unsupported extent resolves this field failure in both execution modes.
+        // New commands must also explicitly supply the newly added hold field.
         for (direct in listOf(false, true)) {
             val permitted = JSONObject(raw)
-            permitted.getJSONObject("decision").put("swipe_extent", "small")
+            permitted.getJSONObject("decision").put("swipe_extent", "small").put("start_hold_ms", 0)
             if (direct) permitted.getJSONObject("decision").put("points", JSONArray("[[450,500],[550,500]]")).put("duration_ms", 800)
             SplitOutputSchema.validate(SplitOutputSchema.normalizeAdditiveState(permitted), SplitOutputSchema.format("primary", direct))
             permitted.getJSONObject("decision").put("swipe_extent", "medium")
@@ -168,10 +225,35 @@ class SplitOutputSchemaTest {
         val values = listOf(JSONObject().put("kind", "finish").put("status", "completed").put("message", "已完成"),
             JSONObject().put("kind", "ask_user").put("message", "选择哪个账户"),
             JSONObject().put("kind", "search_web").put("query", "操作教程"),
-            JSONObject().put("kind", "read_web").put("url", "https://example.test/help"),
-            JSONObject().put("kind", "load_skill").put("name", "app"),
-            JSONObject().put("kind", "read_skill_resource").put("name", "app").put("path", "references/help.md"))
+            JSONObject().put("kind", "read_web").put("url", "https://example.test/help")
+                .put("operation", "read").put("query", "").put("offset", 0).put("limit", 4000))
         for (value in values) SplitOutputSchema.validate(wrapped(value), SplitOutputSchema.format("primary"))
+    }
+
+    @Test fun sharedActionFieldsKeepEachKindAndRejectUnrelatedFields() {
+        for (direct in listOf(false, true)) {
+            val format = SplitOutputSchema.format("primary", direct)
+            for (kind in listOf("enter", "back", "home", "recents", "notifications", "quick_settings", "system_screenshot", "paste")) {
+                val value = JSONObject().put("kind", kind).put("target", "当前界面").put("expected", "界面变化").put("screen_context", "")
+                assertEquals(kind, SplitAgentProtocol.content(response(wrapped(value)), format, "primary").getString("action"))
+                for (field in listOf("package_name", "text", "request_login_code", "points", "percent")) {
+                    assertThrows(SplitSchemaViolation::class.java) {
+                        SplitOutputSchema.validate(wrapped(JSONObject(value.toString()).put(field, JSONObject.NULL)), format)
+                    }
+                }
+            }
+            for (kind in listOf("login_username", "login_password")) {
+                val value = JSONObject().put("kind", kind).put("target", "输入框").put("expected", "已填写").put("screen_context", "")
+                    .put("package_name", "dev.example.app").put("credential_label", "本机账户")
+                SplitOutputSchema.validate(wrapped(value), format)
+                assertThrows(SplitSchemaViolation::class.java) { SplitOutputSchema.validate(wrapped(value.put("kind", "launch")), format) }
+            }
+            for (kind in listOf("load_skill", "read_skill_resource")) {
+                val value = JSONObject().put("kind", kind).put("name", "app")
+                if (kind == "read_skill_resource") value.put("path", "references/help.md")
+                assertThrows(SplitSchemaViolation::class.java) { SplitOutputSchema.validate(wrapped(value), format) }
+            }
+        }
     }
 
     @Test fun nullableStateKeepsItsContractAndReportsTheObjectBranchFailure() {

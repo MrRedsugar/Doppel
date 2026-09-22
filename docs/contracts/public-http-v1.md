@@ -6,6 +6,11 @@ gateway requires Authorization: Bearer <developer-token> and binds the single ow
 are separate internal credentials and cannot configure user extensions or read
 another owner's data. Health is GET /health with no token and contains no secrets.
 
+Skills routes and model tools are retired. `/v1/skills` and its former child
+routes return the normal unknown-route response; `list_skills`, `read_skill`,
+`load_skill` and `read_skill_resource` are not registered tools. Existing imported
+files are retained. Document operations and long-term memory are unchanged.
+
 ## Devices and Tasks
 
 | Method and path after /v1 | Body/query | Result |
@@ -14,7 +19,9 @@ another owner's data. Health is GET /health with no token and contains no secret
 | GET /devices | None | {items:[Device]} |
 | GET /points | None | Developer gateway only: unlimited=true, retained input/output tokens and estimated used_points |
 | GET /usage | None | Token-first usage dashboard: aggregate input/output tokens, request and screenshot counts, plus up to 30 daily `{date,input_tokens,output_tokens,requests,screenshots}` rows; no points field |
-| POST /runs | {device_id,goal,mode,allowed_packages?,parent_run_id?} | Run; HTTP 201 |
+| POST /runs | {device_id,goal,mode,allowed_packages?,parent_run_id?,request_id?,defer_start?,source?,source_metadata?} | Run; HTTP 201 |
+| GET /devices/{id}/queue | None | {items:[Run]} in persistent FIFO admission order, unfinished only |
+| POST /runs/{id}/start | None | Atomically start the queued FIFO head; never bypass another unfinished task |
 | GET /runs | None | {items:[Run]} |
 | GET /runs/{id} | None | Run; includes a stable local `title` and `conversation_id` |
 | POST /conversation/intent | {message,history?,device_available?} | Structured `{intent,confidence,task_goal,title,question,reply?}`; never creates a task |
@@ -22,7 +29,7 @@ another owner's data. Health is GET /health with no token and contains no secret
 | POST /runs/{id}/review | {question} (1–2000 chars) | Read-only model analysis of the recorded run |
 | POST /runs/{id}/pause | None | Run |
 | POST /runs/{id}/resume | None | Run |
-| POST /runs/{id}/cancel | None | Run |
+| POST /runs/{id}/cancel | {expected_status?} | Run; an optional exact-state precondition prevents cancellation/promotion races |
 | POST /runs/{id}/answer | {request_id,text?,approve?} | Run |
 | GET /runs/{id}/events | after integer, default 0 | {items:[Event]} |
 | GET /devices/{id}/commands | timeout seconds, 0..25 | {command:Command|null} |
@@ -32,9 +39,20 @@ another owner's data. Health is GET /health with no token and contains no secret
 mode is ask, assist or full. allowed_packages is an optional array of up to forty
 Android package names; an empty array leaves package selection to the authorized
 task. The broker always preserves permission/payment checks. A device cannot have
-two active tasks. Querying/operating a foreign owned resource returns 403/404.
+two executing tasks. New work behind any unfinished task is `queued` and performs
+no model work or device actions. `defer_start=true` also queues an idle first task
+until the device dispatcher finishes readiness checks. Querying/operating a foreign
+owned resource returns 403/404.
 
-Optional `parent_run_id` continues a conversation from a terminal run owned by
+Manual and automatic sources share `queue_sequence` order; `queue_position` is the
+current unfinished-task position. Completed, failed and cancelled tasks leave the
+queue. Paused, awaiting-input and awaiting-approval tasks retain the head. The
+dispatcher starts the next task only after device actions and protected-session
+cleanup finish. Cancelling a queued task must not invalidate the executing task.
+Automatic sources (`schedule`, `trigger`) always enter queued; their notice and
+unlock preparation run at the head, not at submission time.
+
+Optional `parent_run_id` continues a conversation from a run owned by
 the same user on the same device. The new execution has its own mode, permissions,
 commands and fresh observation. The conversation reader resolves retained source
 records with a 12-entry/24000-character bound; deleting an ancestor truncates its
@@ -88,10 +106,10 @@ not command acceptance alone. Completed tasks require host-generated evidence.
 }
 ```
 
-Command.kind supports observe/launch/tap/long_press/type/login_phone/login_code/
+Command.kind supports observe/launch/tap/pay/long_press/type/login_phone/login_code/
 scroll/back/home/wait/screenshot/open_document. launch uses package_name; type uses text; scroll uses direction
 up/down/left/right and optionally target; wait uses duration_ms; open_document uses
-uri. Tap/long_press/type/login_phone/login_code require target and screen_id.
+uri. Tap/pay/long_press/type/login_phone/login_code require target and screen_id.
 Login commands require the current package_name and reject non-null text; local
 profiles supply values. Their MCP tools accept only target and screen_id.
 observe can request include_screenshot.
@@ -128,16 +146,25 @@ malformed IDs and non-string values are rejected. The Android setting defaults t
 off and requires three timed, local risk acknowledgements before enabling.
 There is no model, MCP or user HTTP endpoint that creates local consent.
 
+The model declares an actual payment with `act(action="pay")`, based on the current
+screen and user intent. Browsing orders, payment history or checkout details uses
+ordinary `tap`, without a new `safety` field. In Android's A/B flow, A chooses
+`pay`; B only locates its tap target. Host/device code does not classify payment
+from node labels, target-description keywords or other text on the page.
+
 Only the runtime may copy the current device observation's consent ID onto a
-recognized ordinary payment `tap` command. `Command.payment_consent_id` is invalid
-for other command kinds. An `act` caller cannot supply the field, including null.
+`pay` command for a `full` task. `Command.mode` comes from the stored task.
+An `act` caller cannot supply either `mode` or `payment_consent_id`, including null.
+Legacy `tap` commands with consent are readable for migration but are blocked,
+not replayed as payments. Other command kinds cannot carry consent.
 Compact model observations report `delegated_payment=enabled|disabled` without
 exposing the identifier; a read-only observation never enables the setting.
 
-Without consent every mode hands payment to the user. With consent, ask/assist
-hold the payment action for approval, and full may queue it within the user's task.
-The gateway rechecks consent and screen at approval and dispatch; Android rechecks
-the persisted local generation and exact current screen immediately before action.
+Payment requires both `full` task access and valid local consent. `ask`/`assist`
+hand payment to the user even when the switch is on; ordinary action approval
+cannot upgrade the task's payment authority. The gateway rechecks stored mode,
+consent and target at dispatch; Android rechecks the persisted local generation
+and current source context immediately before action.
 Payment does not use relaxed target revalidation. Revocation or a new consent
 generation invalidates old commands, even if the device is offline. Payment
 credentials, financial OTPs, transfers and persistent debit settings remain manual.
@@ -156,8 +183,8 @@ the subsequent screen/order state. A blocked payment can return
 `payment_guard`. Display the result and use the takeover/resume flow above.
 Do not turn a blocked, stale, failed or uncertain attempt into an automatic retry.
 
-Update Android and gateway together: old clients omit consent and remain manual,
-while older gateways may reject the additional observation field. See
+Update Android and gateway together: old versions do not support `pay`; missing
+consent remains disabled and legacy consent-stamped taps are not replayed. See
 [Delegated Payment](../developer/payment-delegation.md) for the matching local
 database/grant-file requirement, revocation failures and UI recognition limits.
 

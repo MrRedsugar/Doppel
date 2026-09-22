@@ -89,7 +89,7 @@ def test_desired_state_noop_cannot_bypass_application_scope(runtime):
 
 def test_desired_state_noop_does_not_override_payment_manual_boundary(runtime):
     device, run, screen = observed_toggle(runtime, True, label="Pay $28.00")
-    command = runtime.queue_command(run.id, "tap", target="toggle", screen_id=screen.screen_id, desired_checked=True)
+    command = runtime.queue_command(run.id, "pay", target="toggle", screen_id=screen.screen_id, desired_checked=True)
     assert runtime.command_result(command.id).status == "blocked"
     assert runtime.next_command("alice", device.id) is None
     assert runtime.get_run("alice", run.id).status == "paused"

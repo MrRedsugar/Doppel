@@ -102,10 +102,24 @@ class AutomaticUnlockSettingsActivity : Activity() {
                 else -> renderEntry(body, saved)
             }
         }
+        if (!editing) {
+            val lanEnabled = AutomaticUnlockCredentials.isLanHandoffEnabled(this)
+            body.addView(UiTheme.toggle(this, "同一局域网免密码接管", lanEnabled) { checked ->
+                // Redraw before authentication: cancelling must leave the saved switch unchanged.
+                render()
+                if (authentication != null) return@toggle
+                if (checked) authenticate(null, enableLanHandoff = true)
+                else runCatching { AutomaticUnlockCredentials.setLanHandoffEnabled(this, false) }
+                    .onSuccess { render() }.onFailure { toast("设置未保存，请重试"); render() }
+            }.apply { isEnabled = enabled || lanEnabled; filterTouchesWhenObscured = true })
+            note(body, "默认关闭。仅在本应用自动解锁后，已配对电脑通过局域网加密连接确认在附近时，长按接管 3 秒可免密码；停止任务仍需验证。请保持手机 PC 连接服务与电脑版运行，云端在线不代表处于同一局域网。断线证明最迟 12 秒后失效，恢复密码验证。")
+            note(body, "开启后，电脑在附近时，任何拿到手机的人都可能接管自动任务。只应在可信环境使用。", true)
+            command("管理已配对电脑") { startActivity(android.content.Intent(this, PcConnectionActivity::class.java)) }
+        }
         note(body, "高风险：开启后，自动任务会使用保存的密码实际解锁手机。全屏悬浮窗只能阻挡普通触摸，不能替代系统锁屏；执行手势时拦截会短暂放行。系统界面、强停应用、服务中断等仍可能让他人使用手机。手机遗失、被借用或无人看管时存在盗用风险。", true)
         note(body, "锁屏密码仅在本机加密保存、不备份、不发送给 AI。为能在锁屏时解锁，Doppel 在后台可读取该密码。停用会保留加密密码，只有主动删除才会删除密码。请勿在共享设备或无法接受风险时开启。")
         note(body, "系统身份验证只证明是你在设置，不能证明保存或录入的密码与系统密码一致。自动解锁失败后会停用并保留密码，等待你检查，不会反复试错。")
-        note(body, "任务期间长按接管或停止 3 秒，再进行本机密码验证；不会先重新锁屏。连续输错 3 次或 5 秒没有操作会继续原任务；每次验证最长 30 秒，返回后 10 秒内不能重复唤起。此验证不具有系统锁屏的安全等级。")
+        note(body, "任务期间长按接管或停止 3 秒，按上述设置决定是否验证密码；不会先重新锁屏。连续输错 3 次或 5 秒没有操作会继续原任务；每次验证最长 30 秒，返回后 10 秒内不能重复唤起。此验证不具有系统锁屏的安全等级。")
     }
 
     private fun renderEntry(body: LinearLayout, saved: Boolean) {
@@ -175,18 +189,18 @@ class AutomaticUnlockSettingsActivity : Activity() {
     }
 
     @android.annotation.TargetApi(30)
-    private fun authenticate(credential: AutomaticUnlockCredentials.Credential?) {
+    private fun authenticate(credential: AutomaticUnlockCredentials.Credential?, enableLanHandoff: Boolean = false) {
         if (authentication != null || Build.VERSION.SDK_INT < 30) { credential?.close(); return }
         val lock = getSystemService(KeyguardManager::class.java)
         if (lock?.isDeviceSecure != true || lock.isDeviceLocked || lock.isKeyguardLocked) {
             credential?.close(); toast("请先手动解锁手机，再检查自动解锁设置"); render(); return
         }
         pending = credential
-        val reenable = credential == null
+        val reenable = credential == null && !enableLanHandoff
         val signal = CancellationSignal(); authentication = signal
         main.postDelayed(timeout, 60_000)
         try {
-            BiometricPrompt.Builder(this).setTitle("确认自动解锁设置")
+            BiometricPrompt.Builder(this).setTitle(if (enableLanHandoff) "确认免密码接管设置" else "确认自动解锁设置")
                 .setDescription("请输入系统锁屏密码验证身份")
                 .setAllowedAuthenticators(BiometricManager.Authenticators.DEVICE_CREDENTIAL).build()
                 .authenticate(signal, mainExecutor, object : BiometricPrompt.AuthenticationCallback() {
@@ -198,11 +212,12 @@ class AutomaticUnlockSettingsActivity : Activity() {
                         try {
                             check(result.authenticationType == BiometricPrompt.AUTHENTICATION_RESULT_TYPE_DEVICE_CREDENTIAL)
                             check(lock.isDeviceSecure && !lock.isDeviceLocked && !lock.isKeyguardLocked)
-                            if (reenable) AutomaticUnlockCredentials.reenable(this@AutomaticUnlockSettingsActivity)
+                            if (enableLanHandoff) AutomaticUnlockCredentials.setLanHandoffEnabled(this@AutomaticUnlockSettingsActivity, true)
+                            else if (reenable) AutomaticUnlockCredentials.reenable(this@AutomaticUnlockSettingsActivity)
                             else requireNotNull(value).let { AutomaticUnlockCredentials.save(this@AutomaticUnlockSettingsActivity, it.kind, it.value) }
                             editing = false
-                            toast(if (reenable) "已重新启用；请确保保存的密码仍与系统密码一致" else "已保存并开启；所填密码尚未经实际解锁验证")
-                        } catch (_: Exception) { toast("未能开启自动解锁，请检查保存状态或重新填写") }
+                            toast(if (enableLanHandoff) "已开启同一局域网免密码接管" else if (reenable) "已重新启用；请确保保存的密码仍与系统密码一致" else "已保存并开启；所填密码尚未经实际解锁验证")
+                        } catch (_: Exception) { toast("未能保存设置，请检查自动解锁状态") }
                         finally { value?.close(); render() }
                     }
                     override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {

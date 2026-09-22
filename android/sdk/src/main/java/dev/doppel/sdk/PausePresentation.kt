@@ -3,7 +3,8 @@ package dev.doppel.sdk
 import org.json.JSONObject
 
 /** Presentation hints never grant permission, resume a run, or infer task success. */
-internal data class PausePresentation(val category: String, val reason: String, val nextStep: String, val userInitiated: Boolean = false) {
+internal data class PausePresentation(val category: String, val reason: String, val nextStep: String, val userInitiated: Boolean = false,
+                                     val showLoginSettings: Boolean = false) {
     val detail get() = "$category\n$reason\n\n下一步：$nextStep"
     val compact get() = if (userInitiated) "" else category
     val surfaceReason get() = when {
@@ -22,13 +23,15 @@ internal data class PausePresentation(val category: String, val reason: String, 
             val reason = message.take(4000).takeUnless(::generic) ?: "执行已暂停，但未收到具体原因。"
             val takeover = run.optJSONObject("pending_request")?.optString("reason").orEmpty()
             return when {
+                takeover == "login" ->
+                    PausePresentation("需要登录设置", reason, "可以设置登录方式，或在当前应用手动登录；准备好后点击继续。", showLoginSettings = true)
                 manual(message) ->
                     PausePresentation("主动暂停", reason, "准备好后点击继续执行。", true)
                 message.startsWith("已达到本机任务调用或时间上限") ->
                     PausePresentation("任务上限", reason, "查看已完成的进度，结束此任务后拆分为较小的新任务；继续不会重置上限。")
                 takeover == "verification" || message.contains("手动完成安全验证") ->
                     PausePresentation("需要安全验证", reason, "在当前应用手动完成验证，再点击继续重新识别屏幕。")
-                takeover in setOf("payment", "login") || message.contains("付款授权未开启") || message.startsWith("敏感输入、支付验证") ->
+                takeover == "payment" || message.contains("付款授权未开启") || message.startsWith("敏感输入、支付验证") ->
                     PausePresentation("需要手动处理", reason, "核对当前页面并手动处理提示的敏感步骤，完成后再继续。")
                 message.startsWith("视觉目标涉及") ->
                     PausePresentation("操作边界", reason, "在当前应用手动确认或处理后再继续。")

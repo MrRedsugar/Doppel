@@ -97,7 +97,7 @@ class AutomaticTaskNoticeRestartDeviceTest {
         val lock = context.getSystemService(KeyguardManager::class.java)
         assertFalse("This test never unlocks the device", lock.isDeviceLocked || lock.isKeyguardLocked)
         assertTrue(AutoTriggerStore(context).list().none { it.enabled })
-        val runs = File(context.noBackupFilesDir, "direct-runs-v1.json").takeIf(File::exists)?.readText()?.let(::JSONArray) ?: JSONArray()
+        val runs = File(context.noBackupFilesDir, "direct-runs-v1.json").takeIf(File::exists)?.readText()?.let { dev.doppel.sdk.SplitTaskEngine.readPersistedRuns(it) } ?: JSONArray()
         repeat(runs.length()) { assertTrue("Leave unfinished tasks untouched", runs.getJSONObject(it).optString("status") in setOf("completed", "failed", "cancelled")) }
         val previous = prefs.getString("active_run", "").orEmpty()
         assertTrue("Isolate only a known terminal pointer", previous.isBlank() || (0 until runs.length()).any { runs.getJSONObject(it).optString("id") == previous })

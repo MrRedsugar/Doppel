@@ -13,7 +13,7 @@ from zipfile import ZipFile, BadZipFile
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter, column_index_from_string
 
-from .skills import contained_path
+from .paths import contained_path
 
 
 class WorkspaceDocuments:

@@ -4,8 +4,7 @@ import hashlib
 import json
 
 
-INSPECTIONS = {"observe", "describe_screen", "list_apps", "list_skills", "read_skill",
-               "read_skill_resource", "list_documents", "inspect_document", "read_memory", "list_extensions"}
+INSPECTIONS = {"observe", "describe_screen", "list_apps", "list_documents", "inspect_document", "read_memory", "list_extensions"}
 
 
 def record_tool_outcome(runtime, run_id, name, arguments, failed, outcome_status=None):

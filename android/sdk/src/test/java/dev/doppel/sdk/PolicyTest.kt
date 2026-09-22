@@ -7,7 +7,7 @@ class PolicyTest {
     @Test fun longPressRequiresFreshTargetAndPreservesSensitiveGuards() {
         assertEquals("stale", Policy.validate("long_press", "old", "new", Target("Menu", false, true)))
         assertEquals("stale", Policy.validate("long_press", "s", "s", null))
-        assertEquals("blocked", Policy.validate("long_press", "s", "s", Target("Pay now", false, true)))
+        assertEquals("ok", Policy.validate("long_press", "s", "s", Target("Pay now说明", false, true)))
         assertEquals("blocked", Policy.validate("long_press", "s", "s", Target("Secret", true, true)))
         assertEquals("blocked", Policy.validate("long_press", "s", "s", Target("Menu", false, false)))
         assertEquals("ok", Policy.validate("long_press", "s", "s", Target("Menu", false, true)))
@@ -51,16 +51,14 @@ class PolicyTest {
         assertEquals("手机号 +***********", Policy.redactLoginLabel("手机号 +19900000013"))
         assertEquals("verification code", Policy.redactLoginLabel("verification code"))
     }
-    @Test fun paymentAndPasswordAreNeverAllowed() {
+    @Test fun passwordsRemainProtectedRegardlessOfMode() {
         for (mode in listOf("ask", "assist", "full")) {
-            assertEquals("blocked", Policy.validate("tap", "s", "s", Target("确认支付", false, true), mode))
-            assertEquals("blocked", Policy.validate("tap", "s", "s", Target("Pay", false, true), mode))
             assertEquals("blocked", Policy.validate("type", "s", "s", Target("", true, true), mode))
         }
     }
     @Test fun browsingPaymentPageDoesNotAuthorizePayment() {
         assertEquals("ok", Policy.validate("scroll", "s", "s", Target("支付说明", false, true)))
-        assertEquals("blocked", Policy.validate("tap", "s", "s", Target("Pay now", false, true)))
+        assertFalse(Policy.canPay("assist", false, "dev.shop"))
     }
     @Test fun staleAndMissingReferencesAreRejected() {
         assertEquals("stale", Policy.validate("tap", "old", "new", Target("发送", false, true)))

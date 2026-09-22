@@ -20,6 +20,7 @@ internal object ConversationHistory {
             val answer = source.optString("message").take(minOf(4000, remaining)); remaining -= answer.length
             entries += JSONObject().put("id", id).put("goal", goal).put("message", answer)
                 .put("status", source.optString("status")).put("created_at", source.opt("created_at"))
+                .apply { for (key in listOf("attachments", "reference_attachments")) source.optJSONArray(key)?.let { put(key, ChatAttachmentContext.metadata(it)) } }
             id = source.optString("parent_run_id")
         }
         return JSONArray(entries.asReversed())
@@ -51,6 +52,7 @@ internal object ConversationHistory {
                 .put("message", safeText(source.optString("message"), 4000))
                 .put("status", source.optString("status"))
                 .put("created_at", source.opt("created_at"))
+            for (key in listOf("attachments", "reference_attachments")) source.optJSONArray(key)?.let { item.put(key, ChatAttachmentContext.metadata(it)) }
             source.optJSONArray("conversation_messages")?.let { raw ->
                 val messages = JSONArray()
                 for (i in 0 until minOf(raw.length(), 80)) {
@@ -59,7 +61,8 @@ internal object ConversationHistory {
                     if (text.isBlank()) continue
                     val role = row.optString("role").takeIf { it in setOf("user", "assistant", "system") } ?: "assistant"
                     messages.put(JSONObject().put("id", row.optString("id")).put("role", role)
-                        .put("text", text).put("kind", row.optString("kind")).put("created_at", row.opt("created_at")))
+                        .put("text", text).put("kind", row.optString("kind")).put("created_at", row.opt("created_at"))
+                        .apply { row.optJSONArray("attachments")?.let { put("attachments", ChatAttachmentContext.metadata(it)) } })
                     remaining -= text.length
                     if (remaining <= 0) break
                 }

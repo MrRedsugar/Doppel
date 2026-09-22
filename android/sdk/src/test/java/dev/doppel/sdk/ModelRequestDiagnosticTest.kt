@@ -15,7 +15,7 @@ class ModelRequestDiagnosticTest {
         assertEquals("low", metadata.getString("reasoning_effort"))
         assertEquals("auto", metadata.getString("tool_choice"))
         assertEquals("strict_tool", metadata.getString("response_format"))
-        assertEquals("doppel_a_ab_v3", metadata.getString("schema_name"))
+        assertEquals("doppel_a_ab_v11", metadata.getString("schema_name"))
         assertTrue(metadata.getBoolean("schema_strict")); assertTrue(metadata.getBoolean("client_length_validation"))
         assertEquals(6500, metadata.getInt("max_tokens"))
         assertEquals(wire.getJSONArray("tools").toString().length, ModelRequestDiagnostic.payloadSizeMetadata(wire).getInt("schema_chars"))
@@ -103,7 +103,7 @@ class ModelRequestDiagnosticTest {
         val metadata = ModelRequestDiagnostic.wireMetadata(wire)
         assertFalse(metadata.getBoolean("enable_thinking")); assertEquals("qwen3.8-flash", metadata.getString("model"))
         assertEquals("json_schema", metadata.getString("response_format")); assertTrue(metadata.getBoolean("schema_strict"))
-        assertEquals("doppel_a_ab_v3", metadata.getString("schema_name"))
+        assertEquals("doppel_a_ab_v11", metadata.getString("schema_name"))
         assertEquals(5, metadata.length()); assertFalse(metadata.toString().contains("private"))
     }
     @Test fun reportsActualStructuredOutputAndDisabledThinkingWithoutCopyingSchema() {
@@ -272,9 +272,9 @@ class ModelRequestDiagnosticTest {
     @Test fun toolDiagnosticsExcludeUnknownNamesAndDoNotClaimCompletenessAfterTraversalCap() {
         val malformed = JSONArray().put(JSONObject.NULL).put(JSONObject().put("type", "function")
             .put("function", JSONObject().put("name", JSONObject().put("secret", "private-name"))))
-            .put(tool("private_secret_name")).put(tool("read_skill_resource"))
+            .put(tool("private_secret_name")).put(tool("read_web"))
         val safe = diagnostic(payload().put("tools", malformed))
-        assertEquals(listOf("read_skill_resource"), offeredNames(safe))
+        assertEquals(listOf("read_web"), offeredNames(safe))
         assertFalse(safe.toString().contains("private"))
         assertTrue(safe.getBoolean("truncated"))
         val large = JSONArray(); repeat(1000) { large.put(tool("action")) }; large.put(tool("launch"))

@@ -42,7 +42,6 @@ import java.util.concurrent.TimeUnit
  * fixture notifications are NOT SMS and use the debug build's explicit test-app source.
  */
 class NativeLoginCodeDeviceTest {
-    @get:org.junit.Rule val terminalTaskPointer: org.junit.rules.TestRule = TerminalTaskPointerTestRule()
     private val inst = InstrumentationRegistry.getInstrumentation()
     private val context get() = inst.targetContext
     private val automation get() = inst.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
@@ -51,6 +50,7 @@ class NativeLoginCodeDeviceTest {
     private val service get() = requireNotNull(DoppelAccessibilityService.instance)
 
     @Test fun realWorkerUsesOnlyFreshRunBoundCodeAndMasksNativeInput() {
+        assertEquals("Run only in the disposable package; never touch a user's app", "dev.doppel.loginqa", context.packageName)
         assertNull("Never replace an existing worker", DeviceWorkerService.instance)
         assertTrue(context.getSharedPreferences("doppel", 0).getString("active_run", "").isNullOrBlank())
         assertFalse("Never interrupt an existing login session", LoginAssist.sensitiveSessionActive())
@@ -91,7 +91,7 @@ class NativeLoginCodeDeviceTest {
             val login = LoginAssist(context)
             // The encrypted original is held only in test memory and restored after the worker stops.
             login.clearAll()
-            login.save(LoginProfile(fixture, secrets[0], "DoppelFixture", true))
+            login.save(LoginProfile(fixture, secrets[0], true))
             context.startActivity(Intent().setClassName(fixture, "$fixture.MainActivity")
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
             click("验证码通知验证")
@@ -112,9 +112,22 @@ class NativeLoginCodeDeviceTest {
             await("The actual worker must bind this running loopback task") {
                 DeviceWorkerService.instance?.allowsCredentialInput(gateway.runId) == true
             }
-            fun command(kind: String): JSONObject {
-                stage = "command_$kind"
+            fun submit(value: JSONObject): JSONObject {
+                val kind = value.getString("kind")
                 assertTrue("Use the same live worker for every native action", ownedWorker === DeviceWorkerService.instance)
+                val id = UUID.randomUUID().toString()
+                gateway.commands.put(value.put("id", id).put("run_id", gateway.runId).put("split_agent", true))
+                await("Worker must acknowledge $kind through the loopback result endpoint", 15_000) { gateway.receipts.containsKey(id) }
+                return gateway.receipts.getValue(id).also { receipt ->
+                    commandEvidence.put(JSONObject().put("kind", kind).put("status", receipt.optString("status"))
+                        .put("message", sanitized(receipt.optString("message")))
+                        .put("request_login_code", value.optJSONObject("semantic_intent")?.optBoolean("request_login_code") == true)
+                        .put("action_state", receipt.optJSONObject("data")?.optString("action_state").orEmpty()))
+                    assertPrivateFree(receipt)
+                }
+            }
+            fun command(kind: String, candidateId: String? = null): JSONObject {
+                stage = "command_$kind"
                 val field = find { it.isEditable && it.contentDescription?.toString() ==
                     if (kind == "login_phone") "测试手机号输入框" else "测试验证码输入框" }
                 try { field.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id) }
@@ -123,45 +136,123 @@ class NativeLoginCodeDeviceTest {
                 val observation = service.observe()
                 assertEquals(fixture, observation.optString("package_name"))
                 assertPrivateFree(observation)
-                val id = UUID.randomUUID().toString()
-                gateway.commands.put(JSONObject().put("id", id).put("run_id", gateway.runId).put("kind", kind)
-                    .put("split_agent", true).put("package_name", fixture).put("screen_id", observation.getString("screen_id")))
-                await("Worker must acknowledge $kind through the loopback result endpoint", 15_000) { gateway.receipts.containsKey(id) }
-                return gateway.receipts.getValue(id).also { receipt ->
-                    commandEvidence.put(JSONObject().put("kind", kind).put("status", receipt.optString("status"))
-                        .put("message", sanitized(receipt.optString("message")))
-                        .put("action_state", receipt.optJSONObject("data")?.optString("action_state").orEmpty()))
-                    assertPrivateFree(receipt)
-                }
+                return submit(JSONObject().put("kind", kind).put("package_name", fixture)
+                    .put("screen_id", observation.getString("screen_id"))
+                    .apply { candidateId?.let { put("code_candidate_id", it) } })
             }
             fun state() = login.taskStatus(fixture, gateway.runId).also(::assertPrivateFree)
+            fun tapSend(label: String, code: String, requestCode: Boolean, expectDispatch: Boolean = true) {
+                stage = if (requestCode) "worker_send_code" else "worker_ordinary_tap"
+                val button = find { it.text?.toString() == label && it.isClickable }
+                try { button.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id) }
+                finally { button.recycle() }
+                inst.waitForIdleSync(); SystemClock.sleep(400)
+                val bounds = Rect()
+                val current = find { it.text?.toString() == label && it.isClickable }
+                try { current.getBoundsInScreen(bounds) } finally { current.recycle() }
+                val shot = service.execute(JSONObject().put("id", UUID.randomUUID().toString()).put("run_id", gateway.runId)
+                    .put("kind", "screenshot").put("split_agent", true).put("mode", "full"))
+                assertEquals("The actual fixture screen must be capturable before the worker tap", "ok", shot.optString("status"))
+                val frame = shot.getJSONObject("data").getJSONObject("visual_frame")
+                assertEquals(fixture, frame.getString("package_name"))
+                val point = JSONArray().put(bounds.exactCenterX() * 1000.0 / frame.getInt("display_width"))
+                    .put(bounds.exactCenterY() * 1000.0 / frame.getInt("display_height"))
+                val sentAt = System.currentTimeMillis()
+                val receipt = submit(JSONObject().put("kind", "split_action").put("mode", "full").put("source", frame)
+                    .put("semantic_intent", JSONObject().put("action", "tap").put("target", label)
+                        .put("expected", "当前测试应用发送一条登录短信通知").put("request_login_code", requestCode))
+                    .put("action", JSONObject().put("status", "located").put("action", "tap").put("target", label)
+                        .put("points", JSONArray().put(point)).put("duration_ms", 80)))
+                if (!expectDispatch) {
+                    assertEquals("error", receipt.optString("status"))
+                    assertEquals("not_dispatched", receipt.getJSONObject("data").getString("action_state"))
+                    assertEquals("login_request_unavailable", receipt.getJSONObject("data").getString("reason_code"))
+                    assertFalse(LoginNotificationService.connected?.activeNotifications.orEmpty().any {
+                        it.packageName == fixture && it.postTime >= sentAt
+                    })
+                    return
+                }
+                assertEquals("The production worker must dispatch the real send-button gesture", "ok", receipt.optString("status"))
+                await("The worker tap must actually post a new Android notification") {
+                    LoginNotificationService.connected?.activeNotifications?.any {
+                        it.packageName == fixture && it.postTime >= sentAt &&
+                            it.notification.extras.getCharSequence(android.app.Notification.EXTRA_TEXT)?.contains(code) == true
+                    } == true
+                }
+            }
+
+            stage = "prefilled_phone_request"
+            val prefilledPhone = find { it.isEditable && it.contentDescription?.toString() == "测试手机号输入框" }
+            try {
+                assertTrue("The fixture simulates an app remembering its phone number", prefilledPhone.performAction(
+                    AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
+                        putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, secrets[0])
+                    }))
+            } finally { prefilledPhone.recycle() }
+            assertEquals("inactive", state().getString("code_state"))
+            tapSend("发送旧测试验证码", "135790", requestCode = false)
+            assertEquals("An ordinary tap must not start SMS monitoring", "inactive", state().getString("code_state"))
+            tapSend("发送旧测试验证码", "135790", requestCode = true)
+            await("The send-button gesture must arm monitoring without login_phone") { state().optBoolean("code_ready") }
+            val beforeResend = state().getJSONArray("code_candidates").getJSONObject(0).getString("candidate_id")
+            tapSend("发送登录测试验证码", "246810", requestCode = true)
+            await("Resending must replace the previous candidate instead of mixing both requests") {
+                val rows = state().getJSONArray("code_candidates")
+                rows.length() == 1 && rows.getJSONObject(0).getString("candidate_id") != beforeResend
+            }
+            val staleCandidate = command("login_code", beforeResend)
+            assertEquals("An earlier send's candidate cannot be consumed", "error", staleCandidate.optString("status"))
+            assertTrue(fieldValue("测试验证码输入框").isBlank())
+            val fromPrefilled = command("login_code")
+            assertEquals("Prefilled-phone login must fill the freshly requested code", "ok", fromPrefilled.optString("status"))
+            assertEquals(secrets[1], fieldValue("测试验证码输入框"))
+            checks.put("ordinary_tap_does_not_monitor", true).put("prefilled_phone_send_arms_monitor", true)
+                .put("real_send_button_gesture", true).put("resend_discards_old_candidates", true)
+                .put("old_candidate_after_resend_rejected", true).put("prefilled_phone_code_filled", true)
+            val codeField = find { it.isEditable && it.contentDescription?.toString() == "测试验证码输入框" }
+            try { assertTrue(codeField.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
+                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "")
+            })) } finally { codeField.recycle() }
+
             val phone = command("login_phone")
             assertEquals("Phone must be filled through the actual worker gate", "ok", phone.optString("status"))
             assertTrue("Native phone field must contain only the fixture phone", fieldValue("测试手机号输入框") == secrets[0])
             checks.put("real_worker_phone_input", true)
-            assertEquals("waiting", state().getString("code_state"))
+            assertEquals("Filling a phone must clear any previous request without beginning another", "inactive", state().getString("code_state"))
             assertEquals("inactive", login.taskStatus(fixture, "different-fixture-run").getString("code_state"))
             val old = command("login_code")
-            assertEquals("ok", old.optString("status"))
-            assertEquals("waiting_for_code", old.getJSONObject("data").getString("action_state"))
+            assertEquals("error", old.optString("status"))
+            assertEquals("not_dispatched", old.getJSONObject("data").getString("action_state"))
             assertTrue(fieldValue("测试验证码输入框").isBlank())
-            checks.put("real_worker_phone_input", true).put("old_code_rejected", true).put("other_run_inactive", true)
+            checks.put("real_worker_phone_input", true).put("phone_fill_does_not_rearm_monitor", true)
+                .put("old_code_rejected", true).put("other_run_inactive", true)
 
-            stage = "wrong_service_notification"
-            postAndAwait("发送错误服务验证码", "975318", confirmRejection = true)
-            assertEquals("Wrong service marker cannot become ready", "waiting", state().getString("code_state"))
-            val wrong = command("login_code")
-            assertEquals("waiting_for_code", wrong.getJSONObject("data").getString("action_state"))
+            stage = "different_service_notification"
+            tapSend("发送错误服务验证码", "975318", requestCode = true)
+            await("A different company name is a candidate, not an automatic rejection") { state().optBoolean("code_ready") }
+            val other = state().getJSONArray("code_candidates").getJSONObject(0)
+            assertFalse("No user-entered service hint is part of code selection", other.has("signature_matches_hint"))
+            assertTrue(other.getString("context").contains("OtherFixture"))
             postAndAwait("发送支付测试验证码", "864209", confirmRejection = true)
-            assertEquals("Payment notification is not a login code", "waiting", state().getString("code_state"))
-            checks.put("wrong_service_rejected", true).put("payment_code_rejected", true)
+            assertEquals("Payment notification must not add a login candidate", 1, state().getJSONArray("code_candidates").length())
+            checks.put("different_company_candidate_accepted", true).put("payment_code_rejected", true)
                 .put("rejected_real_notifications_replayed_through_listener_for_deterministic_assertion", true)
 
             stage = "fresh_notification"
             postAndAwait("发送登录测试验证码", "246810")
-            await("The real notification callback must mark the fresh session code ready") { state().optBoolean("code_ready") }
+            await("The real notification callback must retain both candidates") { state().getJSONArray("code_candidates").length() == 2 }
+            assertEquals("selection_required", state().getString("code_state"))
             assertTrue("Readiness observations must not consume the code", state().optBoolean("code_ready"))
-            val filled = command("login_code")
+            for (candidateId in listOf(null, "unknown-candidate")) {
+                val refused = command("login_code", candidateId)
+                assertEquals("error", refused.optString("status"))
+                assertEquals("not_dispatched", refused.getJSONObject("data").getString("action_state"))
+                assertTrue("An ambiguous candidate must never alter the field", fieldValue("测试验证码输入框").isBlank())
+                assertTrue("Candidate clarification must not pause the worker", ownedWorker?.isPaused == false)
+            }
+            val candidates = state().getJSONArray("code_candidates")
+            val selected = (0 until candidates.length()).map { candidates.getJSONObject(it) }.single { it.getString("context").contains("DoppelFixture") }
+            val filled = command("login_code", selected.getString("candidate_id"))
             assertEquals("ok", filled.optString("status"))
             assertTrue("Native OTP input must equal the fixture code", fieldValue("测试验证码输入框") == secrets[1])
             assertEquals("consumed", state().getString("code_state"))
@@ -175,7 +266,12 @@ class NativeLoginCodeDeviceTest {
             assertTrue("A consumed code must not alter the native field", fieldValue("测试验证码输入框") == secrets[1])
             assertTrue("Waiting/error result must not pause a live task", ownedWorker?.isPaused == false)
             checks.put("fresh_notification_ready", true).put("native_otp_verified_by_fixture", true)
+                .put("multiple_candidates_require_explicit_selection", true).put("unknown_candidate_not_dispatched", true)
                 .put("one_use_enforced", true).put("receipts_and_observations_redacted", true).put("local_screenshot_fields_masked", true)
+            login.save(LoginProfile(fixture, secrets[0], false))
+            tapSend("发送登录测试验证码", "246810", requestCode = true, expectDispatch = false)
+            assertEquals("Disabled profile must not leave a monitoring session", "inactive", state().getString("code_state"))
+            checks.put("disabled_profile_prevents_monitor_and_send", true)
             assertEquals("No paid model or task creation endpoint exists in this test", 0, gateway.unexpectedRequests)
             passed = true
         } catch (error: Throwable) {

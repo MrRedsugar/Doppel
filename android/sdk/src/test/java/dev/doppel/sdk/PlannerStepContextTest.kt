@@ -6,6 +6,18 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PlannerStepContextTest {
+    @Test fun latestStepIsSentOnceButAnUnexecutedNewIntentKeepsPriorEvidence() {
+        val intent = JSONObject().put("action", "tap").put("target", "全部订单")
+        val receipt = JSONObject().put("command_id", "executed-1").put("status", "ok")
+        val rows = JSONArray().put(JSONObject().put("intent", intent).put("receipt", receipt))
+        val archived = rows.toString()
+        val latest = JSONObject(receipt.toString()).put("launch_verified", true)
+        assertEquals(0, PlannerStepContext.steps(rows, intent, latest).length())
+        val unexecuted = JSONObject().put("action", "tap").put("target", "订单详情")
+        assertEquals(1, PlannerStepContext.steps(rows, unexecuted, latest).length())
+        assertEquals(1, PlannerStepContext.steps(rows, intent, JSONObject().put("command_id", "read-2")).length())
+        assertEquals(archived, rows.toString())
+    }
     @Test fun historyRetainsRecoveryEvidenceAndDoesNotRewriteArchive() {
         val receipt = JSONObject("""{
             "action":"swipe_sequence","status":"error","message":"第二段未完成",

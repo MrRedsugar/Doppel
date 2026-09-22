@@ -23,8 +23,6 @@ class ExtensionUpdate(ExtensionInput):
 def create_extension_router(runtime, owner_dependency):
     manager = get_extension_manager(runtime)
     router = APIRouter(route_class=CheckedRoute)
-    from .skill_api import create_skill_router
-    router.include_router(create_skill_router(runtime, owner_dependency))
 
     @router.get('/extensions')
     def configurations(owner=Depends(owner_dependency)):

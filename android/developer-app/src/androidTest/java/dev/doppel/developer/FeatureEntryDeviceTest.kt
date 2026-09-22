@@ -33,12 +33,13 @@ class FeatureEntryDeviceTest {
     private val folder by lazy { File(context.getExternalFilesDir(null), "full-feature/entries").apply { mkdirs() } }
 
     @Test fun realConfiguredFeaturePagesLoadThroughTheirVisibleNavigation() {
+        assertTrue("Run UI regression only in a disposable APK", context.packageName in setOf("dev.doppel.loginqa", "dev.doppel.queueqa"))
         assertTrue("Finish onboarding before this read-only UI regression", FirstUseConsent.isAccepted(context) && !FirstUseConsent.needsGuide(context))
         assertTrue("Use the user's existing local model configuration", DirectMode.isEnabled(context) && Gateway(context).isConnected())
         assertNull("Stop the worker before viewing protected settings; retain paused tasks", DeviceWorkerService.instance)
         assertFalse("Unlock the emulator before UI regression", context.getSystemService(KeyguardManager::class.java).isDeviceLocked)
         val runsFile = File(context.noBackupFilesDir, "direct-runs-v1.json")
-        val persisted = if (runsFile.exists()) JSONArray(runsFile.readText()) else JSONArray()
+        val persisted = if (runsFile.exists()) dev.doppel.sdk.SplitTaskEngine.readPersistedRuns(runsFile.readText()) else JSONArray()
         repeat(persisted.length()) {
             assertTrue("Preserve tasks: do not run this test while execution is active", persisted.getJSONObject(it).optString("status") in setOf("paused", "completed", "failed", "cancelled"))
         }
@@ -107,21 +108,17 @@ class FeatureEntryDeviceTest {
             back(models)
             val speech = page("离线中文语音识别", SpeechSettingsActivity::class.java, "08-speech", "语音识别", "离线中文识别", "麦克风权限", "已内置 · 约 78 MiB")
             back(speech)
-            val login = page("登录设置", LoginSettingsActivity::class.java, "09-login", "登录辅助", "常用手机号", "保存手机号", "短信通知访问")
+            assertFalse("Login and password management must share one settings entry", hasText(main, "密码管理"))
+            val login = page("登录设置", LoginSettingsActivity::class.java, "09-login-pin", "登录设置",
+                if (CredentialVault(context).hasPin()) "解锁登录设置" else "设置 4 位 PIN")
+            assertFalse("Login details must remain behind the PIN page", hasText(login, "常用手机号") || hasText(login, "已设置应用"))
             back(login)
-            val password = page("密码管理", PasswordSettingsActivity::class.java, "10-password", "密码管理")
-            requireText(password, if (CredentialVault(context).hasPin()) "解锁密码管理" else "设置 4 位 PIN")
-            back(password)
             val payment = page("支付授权", PaymentSettingsActivity::class.java, "11-payment", "支付授权", "允许代为支付")
             requireDescription(payment, "payment_toggle")
             back(payment)
-            val skills = page("扩展与 Skills", ExtensionSettingsActivity::class.java, "12-skills", "扩展", "Skills")
-            await("Skills list must finish loading") { ui { all(skills.window.decorView).any { it.contentDescription == "导入 Skills" && it.isEnabled } } }
-            val catalogue = DirectSkills(context).list().getJSONArray("items")
-            if (catalogue.length() == 0) requireText(skills, "暂无 Skills")
-            else requireText(skills, catalogue.getJSONObject(0).getString("name"))
-            capture("12-skills-loaded", skills)
-            back(skills)
+            val extensions = page("扩展服务", ExtensionSettingsActivity::class.java, "12-extensions", "扩展", "MCP 服务需要网关连接")
+            assertFalse("Retired Skills must have no settings entry", hasText(extensions, "Skills"))
+            back(extensions)
             val triggers = page("自动触发", AutoTriggerSettingsActivity::class.java, "13-triggers", "自动触发", "创建规则", "从当前应用选择控件", "自动解锁设置")
             back(triggers)
             val schedules = page("定时任务", ScheduleActivity::class.java, "14-schedules", "定时任务", "让事情按时发生", "新建计划", "自动解锁设置")
@@ -132,7 +129,7 @@ class FeatureEntryDeviceTest {
             val unlockStatus = when {
                 AutomaticUnlockCredentials.isEnabled(context) -> "已开启 · 更新密码必须重新验证设备身份"
                 AutomaticUnlockCredentials.hasSaved(context) -> "已停用，等待用户检查"
-                else -> "未设置 · 不需要关闭系统锁屏密码"
+                else -> "未设置 · 默认关闭 · 不需要关闭系统锁屏密码"
             }
             requireText(unlock, unlockStatus)
             capture("15-automatic-unlock", unlock)

@@ -22,7 +22,7 @@ from .errors import Conflict, NotFound, PermissionDenied
 from .gateway import CheckedRoute
 from .models import Model, utc_now
 from .runtime import TERMINAL
-from .skills import contained_path
+from .paths import contained_path
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 

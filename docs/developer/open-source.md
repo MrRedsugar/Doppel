@@ -11,6 +11,17 @@ pyproject, Android SDK/developer app/isolated test app sources, Gradle wrapper,
 selected public developer docs, Apache license and third-party notices. Generated
 Android settings explicitly include only those three public modules.
 
+Document and webpage support includes explicitly reviewed Jina Reader browser
+bundles and rebuild sources, their dependency licenses, PDFBox/POI notices,
+POI provenance and rebuild script, and upstream Office test fixtures. The generated
+POI jar is excluded; reconstruct it with `python scripts/prepare-android-office-parser.py`.
+No wildcard grants access to adjacent tools, assets or downloaded packages.
+
+The original completion MP3 is excluded; the exporter generates an original
+`task_completed.wav` tone from sine waves under Apache-2.0, preserving the resource
+name and notification behavior while changing the sound only in the public build.
+See [completion sound provenance](../licenses/task-completed-sound.md).
+
 Excluded: product/, docs/product/, Android commercial app, private service docs, internal
 requirements/research/worklogs, local data, keys, credentials, screenshots,
 databases, Gradle/Python caches, build outputs, toolchain downloads and binary
@@ -22,14 +33,19 @@ Files over 2 MiB and exports over 10 MiB fail. Symlinks/junctions, known API-key
 private-key markers, and private package/account references in public source fail
 the audit. The exact known fake provider-key literal is exempted only in the three
 explicitly named model/internal/scope fixture files. Those checks catch known
-errors and do not replace human secret/license
+errors. Two exact SDK literals are also reviewed: a sibling package identifier
+used to exclude the app's own overlay from captures, and a mock HTTP login route
+in a client test. These exceptions do not permit private imports or additional
+account routes. Public SDK cloud clients remain optional; the private backend is
+not included. These checks do not replace human secret/license
 review. A new public module requires explicit allowlist review. Existing output
 directories are never merged or overwritten; clean an obsolete export separately
 after verifying its location and ownership.
 
 Before release, create a fresh environment, install ./framework[test] from the
 export, run its tests and start the authenticated developer gateway. Independently
-build public Android modules using SDK 35 and JDK 17+. Inspect the final tree and
+build public Android modules using SDK 35 and JDK 21 (including the pinned Office
+parser rebuild). Inspect the final tree and
 dependency notices, including any separately downloaded Harness runtime and
 transitive binary dependencies. Do not equate simulated tests with target-app
 compatibility or a successful real-world task. No publishing step is automatic.

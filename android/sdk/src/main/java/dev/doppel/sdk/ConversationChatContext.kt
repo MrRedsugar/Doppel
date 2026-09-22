@@ -15,19 +15,29 @@ internal object ConversationChatContext {
                 val role = row.optString("role")
                 val content = (row.opt("content") as? String)?.trim().orEmpty()
                 if (role in setOf("user", "assistant") && content.isNotBlank())
-                    rows += JSONObject().put("role", role).put("content", content.take(2000))
+                    rows += JSONObject().put("role", role).put("content", content.take(2000)).apply {
+                        if (role == "user") row.optJSONArray("attachments")?.let { put("attachments", ChatAttachmentContext.metadata(it)) }
+                    }
             }
         }
         discussion("")
         repeat(tasks.length()) { index ->
             val task = tasks.optJSONObject(index) ?: return@repeat
             val goal = task.optString("goal").trim()
-            if (goal.isNotBlank()) rows += JSONObject().put("role", "user").put("content", goal.take(2000))
+            if (goal.isNotBlank()) rows += JSONObject().put("role", "user").put("content", goal.take(2000)).apply {
+                task.optJSONArray("attachments")?.let { put("attachments", ChatAttachmentContext.metadata(it)) }
+                task.optJSONArray("reference_attachments")?.let { put("reference_attachments", ChatAttachmentContext.metadata(it)) }
+            }
             rows += JSONObject().put("role", "assistant").put("content",
                 "此前手机任务的记录（不是当前画面）：状态 ${task.optString("status")}；结果 ${task.optString("message")}".take(2000))
             discussion(task.optString("id"))
         }
         repeat(chats.length()) { index -> if (index !in used) discussion(chats.optJSONObject(index)?.optString("after_run_id").orEmpty()) }
-        return JSONArray(rows.takeLast(limit.coerceAtLeast(0)))
+        val retained = rows.takeLast(limit.coerceAtLeast(0))
+        if (retained.isNotEmpty()) {
+            val refs = ChatAttachmentContext.select(JSONArray(), JSONArray(rows)).getJSONArray("items")
+            if (refs.length() > 0) retained.last().put("reference_attachments", refs)
+        }
+        return JSONArray(retained)
     }
 }

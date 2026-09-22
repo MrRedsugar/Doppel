@@ -23,7 +23,6 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import org.json.JSONArray
-import java.io.File
 
 /** One user-started native setup session. No model, device worker, task or conversation is created. */
 class PermissionSetupActivity : Activity() {
@@ -97,8 +96,8 @@ class PermissionSetupActivity : Activity() {
     }
 
     private fun begin() {
-        if (AutomaticUnlockSession.active || DeviceWorkerService.instance?.isPaused == false ||
-            DemonstrationSession.active || AccessibilityControlPicker.active || !idleStoredTasks()) {
+        if (AutomaticUnlockSession.active || DeviceWorkerService.instance?.hasActiveExecution == true ||
+            AccessibilityControlPicker.active || !idleStoredTasks()) {
             stop("请先结束当前任务，再自动设置权限"); return
         }
         if (!TaskSubmissionGate.creating.compareAndSet(false, true)) {
@@ -114,23 +113,14 @@ class PermissionSetupActivity : Activity() {
         handler.post(tick)
     }
 
-    /** Read only; do not initialize DirectRuntime or alter a stale terminal pointer. */
+    /** Restore committed file data if needed, without starting the runtime or changing task state. */
     private fun idleStoredTasks(): Boolean = runCatching {
-        val pointer = prefs.getString("active_run", "").orEmpty()
-        val file = File(noBackupFilesDir, "direct-runs-v1.json")
-        val rows = if (file.exists()) JSONArray(file.readText()) else JSONArray()
-        var terminalPointer = pointer.isBlank()
-        for (i in 0 until rows.length()) {
-            val row = rows.getJSONObject(i)
-            if (!TaskPresentation.terminal(row.optString("status"))) return@runCatching false
-            if (row.optString("id") == pointer) terminalPointer = true
-        }
-        terminalPointer
+        idleStoredTasks(DirectRunStateFile(noBackupFilesDir).read(), prefs.getString("active_run", "").orEmpty())
     }.getOrDefault(false)
 
     private fun current() = active && TaskControl.isCurrent(generation) &&
         prefs.getString("active_run", "").orEmpty() == initialPointer &&
-        DeviceWorkerService.instance === worker && worker?.isPaused != false && !AutomaticUnlockSession.active
+        DeviceWorkerService.instance === worker && worker?.hasActiveExecution != true && !AutomaticUnlockSession.active
 
     private val tick = object : Runnable {
         override fun run() {
@@ -363,6 +353,16 @@ class PermissionSetupActivity : Activity() {
         private const val NOTICE_ID = 4173
         private const val CHANNEL = "doppel_permission_setup"
         private const val ACTION_STOP = "dev.doppel.permission_setup_stop"
+        internal fun idleStoredTasks(value: String?, pointer: String): Boolean = runCatching {
+            val rows = value?.let(SplitTaskEngine::readPersistedRuns) ?: JSONArray()
+            var terminalPointer = pointer.isBlank()
+            for (i in 0 until rows.length()) {
+                val row = rows.getJSONObject(i)
+                if (!TaskPresentation.terminal(row.optString("status"))) return@runCatching false
+                if (row.optString("id") == pointer) terminalPointer = true
+            }
+            terminalPointer
+        }.getOrDefault(false)
         internal fun notificationAccessIntent(context: android.content.Context): Intent =
             if (Build.VERSION.SDK_INT >= 30) Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS)
                 .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME, ComponentName(context, LoginNotificationService::class.java).flattenToString())

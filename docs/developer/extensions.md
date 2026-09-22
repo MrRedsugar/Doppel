@@ -1,43 +1,10 @@
-# Skills and MCP extensions
+# MCP extensions
 
 The public Python gateway requires Python 3.12+ and the official MCP SDK 2.1.x.
 The SDK exposes MCPServer, snake_case Python model fields, and wire-format JSON
 aliases. These interfaces do not assume Python or Node exists on Android.
 
-## Skills
-
-The developer APK also supports [phone-local progressive Skills](direct-skills.md)
-in direct mode, with an imported catalogue and a versioned Arknights reference.
-MCP services still use the gateway; a Skill never grants MCP/device capabilities.
-
-```python
-from doppel.skills import SkillCatalog
-
-catalog = SkillCatalog('framework/examples/skills')
-metadata = catalog.list_skills()
-instructions = catalog.read_skill('workbook-summary')
-reference = catalog.read_resource('workbook-summary', 'references/operations.md')
-```
-
-Each immediate subdirectory has SKILL.md with YAML frontmatter. Required fields
-are name (matching the folder) and description. Optional platforms is a string
-array; dependencies is an object with runtimes and tools string arrays. Unknown
-frontmatter fields are ignored; dependency keys outside this contract are rejected.
-YAML object tags and aliases are rejected. No scripts are executed or imported.
-
-list_skills returns compact dictionaries with name, description, platforms,
-dependencies, runtime_status="unverified", and trusted=false. read_skill adds
-instructions; read_resource returns UTF-8 text. Only the requested resource is
-loaded. The host must independently verify dependency availability and use its
-normal authorization policy for any requested capability. Metadata cannot claim
-that a desktop runtime is available on a phone.
-
-Default limits: 100 skills, 64 KiB per SKILL.md/resource, 32 strings per metadata
-list, 256 characters per item and 1,024 characters per description. Constructor
-limits can be lowered. Absolute paths, traversal, alternate data streams, symlinks
-and Windows junctions are rejected. The configured root must be owned by the host;
-these checks are not an OS sandbox against a hostile process modifying directories
-concurrently. Malformed skill data raises ValueError; missing files raise OSError.
+Skills imports, catalogs and runtime tools have been removed. Existing user data is retained; task corrections use editable long-term memory. See [retirement details](direct-skills.md).
 
 ## MCP
 
@@ -191,8 +158,8 @@ shutdown to avoid leaving Windows Proactor/SSE request tasks in a server thread.
 
 ## Android extension management
 
-`dev.doppel.sdk.ExtensionSettingsActivity` presents separate Services and Skills
-tabs using the shared theme and sheets. It lists all named services, supports
+`dev.doppel.sdk.ExtensionSettingsActivity` presents configured MCP services
+using the shared theme and sheets. It lists all named services, supports
 add/edit/delete and discovery, and saves explicit per-tool allow/read-only
 choices. Descriptions and external read-only annotations never select grants.
 New services have no allowed tools. The current HTTP connector has no OAuth or
@@ -201,74 +168,6 @@ service name or URL. Android's developer direct-model mode displays these server
 features as unavailable instead of contacting an old gateway configuration.
 
 Register the Activity with `android:exported="false"`. No external deep-link
-intent filter is required. The document picker requires a user-selected
-`content://` URI and temporarily reads that file; no broad storage permission or
-persistent file grant is requested. A successful import becomes available to the
-same account's `list_skills`, `read_skill` and `read_skill_resource` runtime tools.
-
-## User Skills import API
-
-These authenticated routes are included with `create_extension_router` and the
-ordinary gateway `/v1` router. They are setup APIs, never model execution tools.
-
-| Route | Behavior |
-| --- | --- |
-| GET /skills | List host Skills and this account's imports under `items` |
-| POST /skills/import | Import one complete `text/markdown` or `application/zip` body; 201 |
-| GET /skills/{name} | Read metadata and instructions, with `source` and `trusted=false` |
-| GET /skills/{name}/resources?path=references/example.md | Read one bounded UTF-8 resource |
-| DELETE /skills/{name} | Remove only this account's imported Skill |
-
-Raw markdown must contain valid `SKILL.md` frontmatter. ZIPs contain exactly one
-`SKILL.md`, either at the archive root or beneath one enclosing directory. Every
-file belongs to that Skill. The metadata name becomes its installed directory
-name; enclosing archive directory names are not trusted identifiers.
-
-```text
-notes/SKILL.md
-notes/references/example.md
-notes/scripts/example.py
-```
-
-Maximums are 2 MiB compressed upload, 2 MiB total expanded data, 128 ZIP members,
-100 files, 64 KiB per file, eight path components and 240 characters per archive
-path. A raw `SKILL.md` is at most 64 KiB. Uploads have a 15-second total deadline.
-Reject absolute paths, traversal, backslashes, alternate data streams, Windows
-device names, trailing dots/spaces, control characters, duplicate/case-colliding
-paths, file/directory collisions, links, special files, encrypted members,
-malformed ZIPs and invalid metadata. The entire package is validated before any
-file is published; a complete directory is installed with one rename.
-
-Imports are stored in `data_dir/imported-skills/<sha256-of-owner>/<skill-name>`.
-No account-provided identifier is used directly as a path. Host Skills remain
-under `data_dir/skills`, are listed as `source="host"`, and cannot be removed or
-overridden through this API. Imports use `source="imported"`; names must be
-unique across host and account imports, ignoring case. Duplicates return 409;
-remove the account import explicitly before replacing it. There are at most 100
-imports per account, independent of the host catalog's limit.
-
-Package scripts are retained only as data. Importing never executes, installs
-dependencies, contacts external URLs, creates a task, marks a Skill trusted, or
-grants MCP/device capabilities. Every normal authorization boundary still applies.
-Reading external instructions is not authorization to perform their instructions.
-Deleting a Skill prevents subsequent reads; it cannot erase text already loaded
-into an active model context. This filesystem implementation is intended for one
-gateway process and a host-owned data directory; multi-replica deployments need
-shared catalog/storage coordination. A hostile local process is not sandboxed.
-
-## Reserved community handoff
-
-There is no live community catalog or automatic network importer in this release.
-The reserved future contract is:
-
-```text
-doppel://skills/import?v=1&url=<percent-encoded-https-zip-url>&sha256=<64-hex-digest>
-```
-
-This is documentation only: the current APK does not register or resolve this
-scheme. A future implementation must first show publisher, package name, download
-origin, digest and requested dependencies, then require the user's import action.
-It must restrict redirects and download size, verify the exact digest and apply
-the same archive checks. A URI, publisher label or package manifest cannot grant
-trust or execution permissions. Community service authentication, signatures and
-revocation policies remain future server work, not working controls in this UI.
+intent filter is required. The former `/skills` setup API and skill-reading model
+tools are no longer registered; calling them follows the normal unknown-route
+or unknown-tool response. No existing imported files are removed on upgrade.

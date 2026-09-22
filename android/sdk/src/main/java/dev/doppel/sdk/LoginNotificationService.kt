@@ -19,8 +19,10 @@ class LoginNotificationService : NotificationListenerService() {
         if (trusted.isEmpty() || notification.packageName != trusted) return
         val extras = notification.notification.extras
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
-        val body = (extras.getCharSequence(Notification.EXTRA_BIG_TEXT) ?: extras.getCharSequence(Notification.EXTRA_TEXT))?.toString().orEmpty()
-        LoginAssist.session.receive(notification.packageName, trusted, foreground, "$title $body", notification.postTime)
+        val messages = extras.getParcelableArray(Notification.EXTRA_MESSAGES)
+        val latest = messages?.let { Notification.MessagingStyle.Message.getMessagesFromBundleArray(it).maxByOrNull { message -> message.timestamp } }
+        val body = latest?.text?.toString() ?: (extras.getCharSequence(Notification.EXTRA_BIG_TEXT) ?: extras.getCharSequence(Notification.EXTRA_TEXT))?.toString().orEmpty()
+        LoginAssist.session.receive(notification.packageName, trusted, foreground, "$title $body", latest?.timestamp ?: notification.postTime)
     }
     override fun onListenerDisconnected() { if (connected === this) connected = null; LoginAssist.clearSession(); super.onListenerDisconnected() }
     override fun onDestroy() { if (connected === this) connected = null; super.onDestroy() }

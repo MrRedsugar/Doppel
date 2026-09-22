@@ -1,16 +1,19 @@
 import asyncio
 import hashlib
 import json
+import re
 import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import get_args
 
 from .errors import Conflict, NotFound, PermissionDenied, ScopeDenied
-from .models import Command, CommandResult, Device, Event, Observation, Run, ConversationMessage, TaskStateUpdate, utc_now
+from .models import Command, CommandResult, Device, Event, Observation, Run, RunStatus, ConversationMessage, TaskStateUpdate, utc_now
 from .policy import ActionPolicy
 from .store import Store
 from .providers import DEFAULT_PROVIDER, resolve_configuration
+from . import submission
 
 TERMINAL = {"completed", "failed", "cancelled"}
 TAKEOVER_REASONS = {"verification", "login", "payment", "interruption"}
@@ -57,13 +60,18 @@ class DoppelRuntime:
     def _recover_interrupted_runs(self):
         # A data directory has one runtime owner; persisted workers cannot resume.
         with self.store.transaction() as db:
-            for row in db.execute("SELECT payload FROM runs").fetchall():
+            for row in db.execute("SELECT rowid,payload FROM runs ORDER BY rowid").fetchall():
                 run = Run.model_validate_json(row["payload"])
-                if run.status in TERMINAL:
+                if not run.queue_sequence:
+                    run.queue_sequence = row["rowid"]
+                    db.execute("UPDATE runs SET payload=? WHERE id=?", (run.model_dump_json(),run.id))
+                if run.status in TERMINAL or run.status == "queued":
                     continue
-                run.status = "failed"
-                run.message = "Service restarted; verify the previous result before retrying."
-                run.pending_request = None
+                run.status = "paused"
+                run.message = "Service restarted; verify the previous result, then resume or cancel. Old actions were not replayed."
+                run.requires_fresh_observation = True
+                if not (run.pending_request or {}).get("manual_only"):
+                    run.pending_request = None
                 self._update(db, run, "interrupted")
                 self._finish_commands(db, run, "service_restart")
 
@@ -97,16 +105,52 @@ class DoppelRuntime:
         row = self._row(run_id)
         if row["owner"] != owner:
             raise NotFound("Task not found")
-        return Run.model_validate_json(row["payload"])
+        return self._present(Run.model_validate_json(row["payload"]))
+
+    def _queue(self, db, device_id):
+        return [Run.model_validate_json(row["payload"]) for row in db.execute("SELECT payload FROM runs WHERE device_id=? ORDER BY rowid", (device_id,)).fetchall()
+                if json.loads(row["payload"])["status"] not in TERMINAL]
+
+    def _present(self, run):
+        run.queue_position = 0
+        if run.status == "queued":
+            with self.store.lock:
+                queued = [item.id for item in self._queue(self.store.db, run.device_id) if item.status == "queued"]
+            if run.id in queued:
+                run.queue_position = queued.index(run.id) + 1
+        return run
+
+    def queue_snapshot(self, owner, device_id):
+        self._device(owner, device_id)
+        with self.store.lock:
+            waiting = 0
+            runs = self._queue(self.store.db, device_id)
+            for run in runs:
+                if run.status == "queued":
+                    waiting += 1
+                    run.queue_position = waiting
+            return runs
 
     def runs(self, owner):
-        return [Run.model_validate_json(r["payload"]) for r in self.store.all("SELECT payload FROM runs WHERE owner=? ORDER BY rowid DESC LIMIT 200", (owner,))]
+        return [self._present(Run.model_validate_json(r["payload"])) for r in self.store.all("SELECT payload FROM runs WHERE owner=? ORDER BY rowid DESC LIMIT 200", (owner,))]
 
     def create_run(self, owner, device_id, goal, mode, allowed_packages=None, *, parent_run_id=None,
-                   conversation_enabled=True, source="user"):
+                   conversation_enabled=True, source="user", title=None, request_id=None, source_metadata=None, defer_start=False):
         self._device(owner, device_id)
         if not goal.strip() or len(goal) > 12000 or mode not in {"ask", "assist", "full"}:
             raise ValueError("Invalid goal or mode")
+        if title is not None and (not isinstance(title, str) or len(title) > 120):
+            raise ValueError("Invalid title")
+        supplied_title = " ".join((title or "").split())
+        if not isinstance(defer_start,bool):
+            raise ValueError("Invalid deferred start")
+        if request_id is not None and (not isinstance(request_id,str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}",request_id)):
+            raise ValueError("Invalid submission id")
+        source_metadata = {} if source_metadata is None else source_metadata
+        if not isinstance(source_metadata,dict) or len(json.dumps(source_metadata,ensure_ascii=False)) > 4000:
+            raise ValueError("Invalid task source metadata")
+        fingerprint = hashlib.sha256(json.dumps(dict(goal=goal,mode=mode,allowed_packages=allowed_packages or [],parent_run_id=parent_run_id,
+            conversation_enabled=conversation_enabled,source=source,title=title,source_metadata=source_metadata,defer_start=defer_start),sort_keys=True,ensure_ascii=False).encode()).hexdigest()
         token = secrets.token_urlsafe(32)
         if not isinstance(conversation_enabled, bool):
             raise ValueError("conversation_enabled must be boolean")
@@ -118,42 +162,60 @@ class DoppelRuntime:
             if source != "user":
                 raise ValueError("Background task cannot be attached to a conversation")
             raise Conflict("Background task cannot be attached to a conversation")
-        conversation_id = None
-        if conversation_enabled and parent_run_id is not None:
-            parent = self.get_run(owner, parent_run_id)
-            if parent.device_id != device_id or parent.status not in TERMINAL:
-                raise Conflict("Previous conversation must be finished on the same device")
-            if not parent.conversation_enabled:
-                raise Conflict("Previous task has no conversation")
-            conversation_id = parent.conversation_id or parent.id
-        elif conversation_enabled:
-            conversation_id = "conversation-" + secrets.token_hex(12)
+        conversation_id = "conversation-" + secrets.token_hex(12) if conversation_enabled and parent_run_id is None else None
         title = " ".join(goal.strip().split())[:36]
         for prefix in ("请帮我 ", "帮我 ", "请 "):
             if title.startswith(prefix):
                 title = title[len(prefix):]
                 break
-        run = Run(id=secrets.token_hex(16), device_id=device_id, goal=goal.strip(), title=title or "新任务",
+        run = Run(id=secrets.token_hex(16), device_id=device_id, goal=goal.strip(), title=supplied_title or title or "新任务",
                   conversation_id=conversation_id, conversation_enabled=conversation_enabled,
-                  source=source,
+                  source=source, source_metadata=source_metadata,
                   mode=mode, status="running", created_at=utc_now(),
                   allowed_packages=allowed_packages or [], parent_run_id=parent_run_id,
                   conversation_messages=[ConversationMessage(id=secrets.token_hex(8), role="user", text=goal.strip(), kind="request", created_at=utc_now())] if conversation_enabled else [])
         with self.store.transaction() as db:
+            if request_id is not None:
+                retention=db.execute("SELECT minimum_issued_at FROM submission_retention WHERE owner=? AND device_id=?",(owner,device_id)).fetchone()
+                retention_floor=max(retention[0] if retention else 0,submission.floor(int(time.time()*1000)))
+                issued_at=submission.validate(request_id,int(time.time()*1000),retention_floor)
+                prior = db.execute("SELECT run_id,fingerprint,summary FROM run_submissions WHERE owner=? AND device_id=? AND request_id=?", (owner,device_id,request_id)).fetchone()
+                if prior:
+                    if prior["fingerprint"] != fingerprint:
+                        raise Conflict("Submission id was already used for different task content")
+                    try:
+                        return self.get_run(owner,prior["run_id"])
+                    except NotFound:
+                        return Run.model_validate_json(prior["summary"])
+                removed=db.execute("DELETE FROM run_submissions WHERE owner=? AND device_id=? AND issued_at_ms<?",(owner,device_id,retention_floor)).rowcount
+                if removed:
+                    db.execute("INSERT INTO submission_retention VALUES(?,?,?) ON CONFLICT(owner,device_id) DO UPDATE SET minimum_issued_at=excluded.minimum_issued_at",
+                               (owner,device_id,retention_floor))
+                if db.execute("SELECT COUNT(*) FROM run_submissions WHERE owner=? AND device_id=? AND (issued_at_ms IS NULL)=?",(owner,device_id,issued_at is None)).fetchone()[0] >= 2048:
+                    raise Conflict("Legacy submission receipt capacity reached; update submission keys" if issued_at is None
+                                   else "Submission receipt capacity for the last 30 days reached; retry later. Task was not created")
             if parent_run_id is not None:
                 parent = self.get_run(owner, parent_run_id)
-                if parent.device_id != device_id or parent.status not in TERMINAL:
-                    raise Conflict("Previous conversation must be finished on the same device")
+                if parent.device_id != device_id:
+                    raise Conflict("Previous conversation must belong to the same device")
                 if not parent.conversation_enabled:
                     raise Conflict("Previous task has no conversation")
-            active = db.execute("SELECT payload FROM runs WHERE device_id=?", (device_id,)).fetchall()
-            if any(json.loads(r["payload"])["status"] not in TERMINAL for r in active):
-                raise Conflict("This device already has an active task")
+                run.conversation_id = parent.conversation_id or parent.id
+            active = self._queue(db,device_id)
+            if len(active) >= 50:
+                raise Conflict("This device queue is full; cancel or finish an existing task")
+            run.status = "queued" if active or source != "user" or defer_start else "running"
+            run.queue_sequence = db.execute("SELECT COALESCE(MAX(json_extract(payload,'$.queue_sequence')),0)+1 FROM runs WHERE device_id=?", (device_id,)).fetchone()[0]
+            if run.status == "queued":
+                run.message = "任务已加入队列，等待前面的任务结束"
             db.execute("INSERT INTO runs(id,owner,device_id,payload,token_hash) VALUES(?,?,?,?,?)",
                        (run.id, owner, device_id, run.model_dump_json(), hashlib.sha256(token.encode()).hexdigest()))
+            if request_id is not None:
+                db.execute("INSERT INTO run_submissions(owner,device_id,request_id,run_id,fingerprint,summary,issued_at_ms) VALUES(?,?,?,?,?,?,?)",
+                           (owner,device_id,request_id,run.id,fingerprint,self._submission_summary(run),issued_at))
             self.store.event(db, run.id, "created", goal.strip())
         self.run_tokens[run.id] = token
-        return run
+        return self._present(run)
 
     def conversation(self, owner, run_id):
         """Bounded source history, resolved afresh so deletion revokes future context."""
@@ -186,6 +248,11 @@ class DoppelRuntime:
             raise PermissionDenied("Invalid task token")
         return row["owner"]
 
+    @staticmethod
+    def _submission_summary(run):
+        return Run(id=run.id,device_id=run.device_id,goal="",mode=run.mode,status=run.status,source=run.source,
+                   created_at=run.created_at,conversation_enabled=False,queue_sequence=run.queue_sequence).model_dump_json()
+
     def _update(self, db, run, kind="state"):
         if run.status == "completed":
             run.task_state["phase"] = "completed"
@@ -199,6 +266,7 @@ class DoppelRuntime:
                     text=run.message[:12000], kind="progress", created_at=utc_now()))
                 del run.conversation_messages[:-80]
         db.execute("UPDATE runs SET payload=? WHERE id=?", (run.model_dump_json(), run.id))
+        db.execute("UPDATE run_submissions SET summary=? WHERE run_id=?",(self._submission_summary(run),run.id))
         self.store.event(db, run.id, kind, run.message, {"status": run.status})
 
     def update_task_state(self, run_id, value):
@@ -235,6 +303,8 @@ class DoppelRuntime:
             if run.status in TERMINAL:
                 self._finish_commands(db, run)
                 return run
+            if run.status == "queued" and status not in TERMINAL and status != "queued":
+                raise Conflict("Queued tasks must start through the device queue")
             run.status, run.message, run.pending_request = status, message, pending_request
             if status in TERMINAL:
                 run.pending_request = None
@@ -252,6 +322,8 @@ class DoppelRuntime:
                 raise Conflict("Task already ended")
             if run.status == "paused":
                 return run
+            if run.status == "queued":
+                raise Conflict("Queued tasks can only be cancelled")
             run.status, run.message = "paused", "你已暂停任务，继续时将重新观察屏幕"
             self._update(db, run)
         return run
@@ -264,6 +336,8 @@ class DoppelRuntime:
             run = Run.model_validate_json(row["payload"])
             if run.status != "paused":
                 raise Conflict("Task is not paused")
+            if self._queue(db,run.device_id)[0].id != run.id:
+                raise Conflict("Task is not at the head of the device queue")
             if run.pending_request and run.pending_request.get("reason") in TAKEOVER_REASONS:
                 run.pending_request = None
                 run.requires_fresh_observation = True
@@ -273,11 +347,15 @@ class DoppelRuntime:
             self._update(db, run)
         return run
 
-    def cancel_run(self, owner, run_id):
+    def cancel_run(self, owner, run_id, expected_status=None):
+        if expected_status is not None and expected_status not in get_args(RunStatus):
+            raise ValueError("Invalid cancellation precondition")
         self.get_run(owner, run_id)
         with self.store.transaction() as db:
             row = db.execute("SELECT payload FROM runs WHERE id=?", (run_id,)).fetchone()
             run = Run.model_validate_json(row["payload"])
+            if expected_status is not None and run.status != expected_status:
+                raise Conflict("Task state changed; refresh before cancelling")
             if run.status in TERMINAL:
                 return run
             run.status, run.message, run.pending_request = "cancelled", "已取消，已发生的操作不会自动撤销", None
@@ -312,14 +390,15 @@ class DoppelRuntime:
         return run
 
     def queue_command(self, run_id, kind, **fields):
-        if "payment_consent_id" in fields:
-            raise PermissionDenied("payment_consent_id is a host-only field supplied from the device observation")
+        if "payment_consent_id" in fields or "mode" in fields:
+            raise PermissionDenied("mode and payment_consent_id are host-only fields")
         command = Command(id=secrets.token_hex(16), run_id=run_id, kind=kind, **fields)
         with self.store.transaction() as db:
             row = db.execute("SELECT payload,observation FROM runs WHERE id=?", (run_id,)).fetchone()
             if row is None:
                 raise NotFound("Task not found")
             run = Run.model_validate_json(row["payload"])
+            command.mode = run.mode
             if run.status != "running":
                 raise Conflict("Task is not running")
             if run.requires_fresh_observation and kind not in {"observe", "screenshot"}:
@@ -330,16 +409,16 @@ class DoppelRuntime:
             if run.allowed_packages:
                 if kind == "launch" and command.package_name not in run.allowed_packages:
                     raise PermissionDenied("Application is outside this task's authorized packages")
-                if kind in {"tap", "long_press", "type", "login_phone", "login_code", "scroll", "back"} and (observation is None or observation.package_name not in run.allowed_packages):
+                if kind in {"tap", "pay", "long_press", "type", "login_phone", "login_code", "scroll", "back"} and (observation is None or observation.package_name not in run.allowed_packages):
                     error = ScopeDenied if observation is not None else PermissionDenied
                     raise error("Current screen is outside this task's authorized packages")
                 if kind == "open_document":
                     if "cn.wps.moffice_eng" not in run.allowed_packages:
                         raise PermissionDenied("Opening documents requires WPS in the authorized packages")
                     command.package_name = "cn.wps.moffice_eng"
-            node = next((node for node in observation.nodes if node.id == command.target), None) if kind == "tap" and observation else None
-            if (node is not None and command.screen_id == observation.screen_id and
-                    self.policy.payment_target(node, observation) and not self.policy.requires_manual_financial(observation)):
+            node = next((node for node in observation.nodes if node.id == command.target), None) if kind in {"tap", "pay"} and observation else None
+            if (kind == "pay" and run.mode == "full" and node is not None and
+                    command.screen_id == observation.screen_id):
                 command.payment_consent_id = observation.payment_consent_id
             verdict = self.policy.evaluate(run.mode, command, observation)
             if verdict.decision == "deny":
@@ -379,7 +458,8 @@ class DoppelRuntime:
                 if run.status == "running":
                     command = Command.model_validate_json(row["payload"])
                     observation = Observation.model_validate_json(row["observation"]) if row["observation"] else None
-                    if command.payment_consent_id and self.policy.evaluate("full", command, observation).decision != "allow":
+                    command.mode = run.mode
+                    if (command.kind == "pay" or command.payment_consent_id) and self.policy.evaluate(run.mode, command, observation).decision != "allow":
                         result = CommandResult(command_id=command.id, run_id=run.id, status="blocked", observation=observation,
                                                message="付款授权或页面已变化，未派发付款操作", data={"human_takeover": "payment"})
                         db.execute("UPDATE commands SET state='finished',result=? WHERE id=?", (result.model_dump_json(), command.id))
@@ -438,6 +518,8 @@ class DoppelRuntime:
                 raise NotFound("Task not found")
             run = Run.model_validate_json(row["payload"])
             pending = run.pending_request
+            if self._queue(db,run.device_id)[0].id != run.id:
+                raise Conflict("Task is not at the head of the device queue")
             if run.status not in {"awaiting_approval", "awaiting_input"} or not pending or pending["id"] != request_id:
                 raise Conflict("This request is no longer current")
             if pending["kind"] == "approval":
@@ -453,7 +535,7 @@ class DoppelRuntime:
                 elif "extension" not in pending:
                     command = Command.model_validate(pending["command"])
                     observation = Observation.model_validate_json(row["observation"]) if row["observation"] else None
-                    verdict = self.policy.evaluate("full", command, observation)
+                    verdict = self.policy.evaluate(run.mode if command.kind == "pay" or command.payment_consent_id else "full", command, observation)
                     if approve and verdict.decision != "allow":
                         raise Conflict("Approval target changed; observe again")
                     if approve:
@@ -465,7 +547,10 @@ class DoppelRuntime:
                 raise ValueError("A response is required")
             if pending.get("reason") == "application_scope":
                 db.execute("UPDATE runs SET observation=NULL WHERE id=?", (run_id,))
-            run.status, run.message, run.pending_request = "running", "已收到你的回复", None
+            declined = pending["kind"] == "approval" and approve is False
+            run.status = "paused" if declined else "running"
+            run.message = "已拒绝本次操作，任务已暂停" if declined else "已收到你的回复"
+            run.pending_request = None
             self._update(db, run)
             self.store.event(db, run_id, "user_answer", text or ("approved" if approve else "declined"), {"request_id": request_id, "approved": approve})
         return run
@@ -522,11 +607,37 @@ class DoppelRuntime:
             with self.store.transaction() as db:
                 run = self._pause_for_takeover(db, run, reason)
 
+    def start_queued(self, owner, run_id):
+        with self.store.transaction() as db:
+            run=self.get_run(owner,run_id)
+            if run.status in TERMINAL:
+                return run
+            if self._queue(db,run.device_id)[0].id != run.id:
+                raise Conflict("Task is not at the head of the device queue")
+            if run.status == "running":
+                return run
+            if run.status != "queued":
+                raise Conflict("Paused tasks require explicit resume")
+            if any(id != run_id and not task.done() and Run.model_validate_json(self._row(id)["payload"]).device_id == run.device_id for id,task in self.tasks.items()):
+                raise Conflict("Previous task worker is still stopping")
+            run.status,run.queue_position,run.message="running",0,"正在查看手机，准备执行任务"
+            self._update(db,run,"started")
+        return run
+
     def start_run(self, run_id):
-        existing = self.tasks.get(run_id)
-        if existing and not existing.done():
-            raise Conflict("Task worker is already active")
+        with self.store.transaction() as db:
+            run = Run.model_validate_json(self._row(run_id)["payload"])
+            if run.status != "running" or self._queue(db,run.device_id)[0].id != run.id:
+                return False
+            existing = self.tasks.get(run_id)
+            if existing and not existing.done():
+                return False
+            # Tokens are process-local. Reissue only for an admitted head after a restart.
+            token = self.run_tokens.get(run_id) or secrets.token_urlsafe(32)
+            db.execute("UPDATE runs SET token_hash=? WHERE id=?", (hashlib.sha256(token.encode()).hexdigest(),run_id))
+        self.run_tokens[run_id]=token
         self.tasks[run_id] = asyncio.create_task(self._drive(run_id))
+        return True
 
     async def _drive(self, run_id):
         try:

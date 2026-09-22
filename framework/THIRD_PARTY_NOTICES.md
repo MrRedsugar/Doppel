@@ -19,7 +19,6 @@ Installed metadata inspected on 2026-09-07:
 | Pydantic | 2.13.5 | MIT | https://github.com/pydantic/pydantic |
 | MCP Python SDK | 2.1.1 | MIT | https://github.com/modelcontextprotocol/python-sdk |
 | openpyxl | 3.1.5 | MIT | https://openpyxl.readthedocs.io/ |
-| PyYAML | 6.0.3 | MIT | https://github.com/yaml/pyyaml |
 | jsonschema | 4.26.0 | MIT | https://github.com/python-jsonschema/jsonschema |
 | referencing | 0.37.0 | MIT | https://github.com/python-jsonschema/referencing |
 | python-multipart | 0.0.32 | Apache-2.0 | https://github.com/Kludex/python-multipart |
@@ -38,9 +37,13 @@ transitive dependency. Provider service terms and model pricing remain separate.
 | Dependency | Version | License/scope |
 | --- | --- | --- |
 | AndroidX Core/Core-KTX | 1.15.0 | Apache-2.0; Android SDK dependency |
-| SnakeYAML | 2.4 | Apache-2.0; SafeConstructor for bounded Skills metadata |
 | OkHttp | 4.12.0 | Apache-2.0; its bundled Public Suffix List data is MPL-2.0 |
 | jsoup | 1.18.3 | MIT; bounded HTML-to-readable-text processing |
+| PDFBox-Android | 2.0.27.0 | Apache-2.0 Android port; includes upstream PDFBox/FontBox and resource-specific notices |
+| Apache PDFBox / FontBox | 2.0.27 notices | Apache-2.0 code; preserve bundled Adobe/Unicode/font and other resource terms |
+| Bouncy Castle | 1.72 | MIT-style license; PDFBox-Android's bcprov/bcpkix/bcutil dependencies |
+| Apache POI / poi-on-android | POI 5.5.1; adapter `a29c7a4cdd94175c2be43678c82afc818b60ff3f` | Apache-2.0 adapter; transitive dependencies retain their individual notices |
+| Android Hidden Api Bypass | 6.1 | Apache-2.0; own-overlay capture integration |
 | Vosk Android | 0.3.75 | Apache-2.0; local speech recognition runtime |
 | JNA Android AAR | 5.18.1 | Apache-2.0 OR LGPL-2.1-or-later; Doppel uses the Apache-2.0 option |
 | ONNX Runtime Android | 1.22.0 | MIT; embedded Chinese speech inference |
@@ -57,6 +60,15 @@ paths and primitive geometry are preserved as Android VectorDrawables. The full
 upstream license and individual source SHA-256 hashes are bundled in
 `android/sdk/src/main/assets/third_party/Lucide-LICENSE.txt` and
 `Lucide-PROVENANCE.txt`. The launcher's layers mark uses the same licensed geometry.
+
+Android Hidden Api Bypass 6.1 is an unchanged Maven AAR, copyright (C) 2021-2025
+LSPosed. Its upstream `v6.1` revision is
+`71aaad4ce558530b4788da67d0e3d9bb3596e9d3` at
+https://github.com/LSPosed/AndroidHiddenApiBypass . That source has an Apache-2.0
+LICENSE and no separate NOTICE file; the full license matches the bundled
+`android/sdk/src/main/assets/third_party/Apache-2.0.txt`. Its scope and attribution
+also appear in that directory's `NOTICE.txt`. The AAR/classes.jar contain no
+additional license/NOTICE files to reproduce.
 
 The Gradle wrapper scripts and JAR are the sole vendored build-tool artifacts.
 Copyright the original Gradle authors; obtain source/license at
@@ -105,12 +117,10 @@ application compatibility claim follows from these license notices.
 
 The 2026-09-08 Android additions were checked against their resolved Maven POMs
 and jars. SDK assets reproduce jsoup's exact MIT license and OkHttp's Public
-Suffix List notice, along with full Apache-2.0 and MPL-2.0 texts. SnakeYAML's jar
-does not contain a separate NOTICE. See `android/sdk/src/main/assets/third_party/`.
-The original bundled Arknights skill contains independently written factual
-summaries and versioned source links; no game assets, full community dataset or
-third-party walkthrough text are included. Game and source-site rights remain
-with their respective owners.
+Suffix List notice, along with full Apache-2.0 and MPL-2.0 texts.
+See `android/sdk/src/main/assets/third_party/`.
+Skills and their bundled references are no longer shipped with the current runtime.
+Historical notices remain relevant when redistributing archived versions.
 
 These are the inspected direct dependencies, not a complete resolved SBOM.
 Before distributing binaries, capture the exact installed Python dependency tree,
@@ -118,3 +128,48 @@ Gradle dependency reports, Harness runtime version and all transitive license
 files. Include those files with the binary distribution. A future dependency
 upgrade requires another review. The source export's tests verify module and file
 boundaries; they do not provide a legal opinion or an exhaustive license scan.
+
+## Local Reading and Conversation Source Adaptations
+
+The following source revisions and browser bundles are included in the current
+Android source export. All paths below are relative to the repository root;
+`assets` abbreviates `android/sdk/src/main/assets/third_party/`.
+
+| Component | Pinned source/version | Reuse and original license |
+| --- | --- | --- |
+| Jina Reader | `1574bfd380d249c86c82db4dace0d9c8fe17e2b1` | Unchanged `tools/jina-reader-core/vendor/markify.ts`; Apache-2.0 in `tools/jina-reader-core/vendor/LICENSE` and `assets/jina-reader/JINA-LICENSE.txt` |
+| Mozilla Readability | 0.6.0 | Browser article selection; Apache-2.0 in `assets/jina-reader/READABILITY-LICENSE.txt` |
+| MSW Interceptors | 0.45.0 | Official browser Fetch/XHR interception; MIT in `assets/jina-reader/MSW-INTERCEPTORS-LICENSE.txt` |
+| MathML to LaTeX / xmldom | `@nomagick/mathml-to-latex` 1.5.3 | Markify's MathML converter and its embedded XML parser; MIT in `assets/jina-reader/MATHML-LICENSE.txt` and `XMLDOM-LICENSE.txt` |
+| assistant-ui | `5f21b37bee60458cf721b68369b251636cd939e3` | Kotlin adaptation of message repository branching/export algorithms and behavioral fixtures; MIT in `assets/assistant-ui-LICENSE.txt` |
+| DeepSeek Harness file-reference guidance | `ddefc45fbc7f8e46dd73185e68295696d1297887` | Chinese adaptation in `ChatAttachmentContext.PROMPT`; MIT in `assets/deepseek-harness-LICENSE.txt`; distinct from the optional Python Harness runtime above |
+| Agent-Reach website channel | `a19a171fa980a0785849596492e0af4db800c82f` | Remaining Markdown-envelope adaptation in `JinaReaderChannel.kt`; MIT in `assets/agent-reach/LICENSE`; provenance in `assets/agent-reach/SOURCE.md` |
+| open-webSearch | `400678eac49521de8c3bb139f263c83d7300416e` | Kotlin/jsoup adaptation of Bing/Sogou search-result parsers; Apache-2.0 in `assets/Apache-2.0.txt`; source/change notice in `assets/NOTICE.txt` |
+
+Jina/Readability/MSW browser build sources, smoke checks and the exact npm lockfile
+are in `tools/jina-reader-core/`; `assets/jina-reader/SOURCE.md` describes the
+adaptation. MSW's bundled MIT dependencies retain their full texts in
+`OPEN-DRAFT-UNTIL-LICENSE.txt`, `OUTVARIANT-LICENSE.txt`, `RETTIME-LICENSE.txt`,
+`DEBUG-LICENSE.txt`, and `MS-LICENSE.txt` under `assets/jina-reader/`.
+The MathML package already embeds XML parser code; the separately locked xmldom
+version does not establish that embedded parser's exact version.
+
+The Android reader includes no Jina server, Puppeteer, LibreOffice or hosted
+`r.jina.ai` dependency. It also includes no Agent-Reach social/video installers,
+browser-cookie utilities, assistant-ui React runtime, or Harness Node runtime.
+These adaptations do not confer rights to a third-party hosted service.
+
+PDFBox/FontBox's complete upstream resource licenses and notices are preserved
+in `assets/PDFBOX-LICENSE.txt`, `PDFBOX-NOTICE.txt`, `FONTBOX-LICENSE.txt`, and
+`FONTBOX-NOTICE.txt`. These include Adobe glyph/CMap, Unicode, Liberation font
+(SIL OFL), and TwelveMonkeys notices; applicable notices also remain inside the
+upstream AAR resources. Bouncy Castle's original text is reproduced in
+`assets/BouncyCastle-LICENSE.txt`.
+
+The generated POI jar is not committed. `scripts/prepare-android-office-parser.py`
+rebuilds the pinned upstream adapter and checks fixed source and jar hashes.
+`android/sdk/libs/poi-android-5.5.1.provenance.json` records resolved dependency
+versions, hashes and individual notice filenames. Preserve `assets/poi-android/`
+including `NOTICE.txt` and all coordinate-prefixed original LICENSE/NOTICE files.
+See `android/sdk/libs/README.md` for reproducible build instructions. The jar's
+Apache-2.0 adapter license does not replace its bundled dependencies' own terms.

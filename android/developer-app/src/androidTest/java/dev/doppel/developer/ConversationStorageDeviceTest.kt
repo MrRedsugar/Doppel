@@ -15,6 +15,82 @@ import java.util.UUID
 
 /** Real Android persistence with isolated preferences. No requests, runtime, worker or model configuration. */
 class ConversationStorageDeviceTest {
+    @Test fun chatRequestRetriesAndReplyCommitSurviveRecreationWithoutClearingAnotherConversationDraft() {
+        val inst = InstrumentationRegistry.getInstrumentation(); val base = inst.targetContext
+        val prefix = "conversation-receipt-${UUID.randomUUID()}-"; val names = mutableSetOf<String>()
+        val context = object : ContextWrapper(base) {
+            override fun getApplicationContext(): Context = this
+            override fun getSharedPreferences(name: String, mode: Int): SharedPreferences {
+                names += prefix + name
+                return base.getSharedPreferences(prefix + name, mode)
+            }
+        }
+        try {
+            var gateway = Gateway(context)
+            assertTrue(gateway.prefs.edit().putBoolean("direct_mode", false).commit())
+            val runId = "fixture-chat-task"
+            gateway.selectTaskConversation(JSONObject().put("id", runId).put("goal", "合成任务对话"))
+            val key = gateway.conversationKey(); val message = "以后先预览再保存"
+            val initialId = gateway.conversationRequestId(key, runId, message)
+            assertEquals(initialId, gateway.conversationRequestId(key, runId, message))
+            gateway = Gateway(context)
+            assertEquals(initialId, gateway.conversationRequestId(key, runId, message))
+            val otherTaskId = gateway.conversationRequestId(key, "fixture-other-task", message)
+            assertNotEquals(initialId, otherTaskId)
+            val requestId = gateway.conversationRequestId(key, runId, message)
+            assertNotEquals(otherTaskId, requestId)
+            assertEquals(requestId, Gateway(context).conversationRequestId(key, runId, message))
+            assertTrue(gateway.prefs.edit().putString("draft_goal", "  $message  ").commit())
+
+            val chatPreference = "conversation_chat_$key"; val pendingPreference = "conversation_intent_$key"
+            val committed = java.util.concurrent.atomic.AtomicReference<Map<String, *>>()
+            val listener = SharedPreferences.OnSharedPreferenceChangeListener { preferences, changed ->
+                if (changed == chatPreference) committed.set(preferences.all.toMap())
+            }
+            gateway.prefs.registerOnSharedPreferenceChangeListener(listener)
+            var failure: Throwable? = null
+            try {
+                inst.runOnMainSync {
+                    try { gateway.appendCapturedConversationReply(key, runId, message, "会先预览。", "保存偏好", requestId) }
+                    catch (error: Throwable) { failure = error }
+                }
+                failure?.let { throw it }
+            } finally { gateway.prefs.unregisterOnSharedPreferenceChangeListener(listener) }
+            val snapshot = committed.get()
+            assertNotNull("Observe the committed reply through Android preferences", snapshot)
+            assertEquals("The reply and matching draft commit together", "", snapshot!!["draft_goal"])
+            assertFalse("The pending request clears in the reply commit", snapshot.containsKey(pendingPreference))
+            assertEquals(2, JSONObject(snapshot[chatPreference] as String).getJSONArray("messages").length())
+
+            gateway = Gateway(context)
+            val saved = gateway.conversationMessages().toString()
+            assertEquals("", gateway.prefs.getString("draft_goal", "missing"))
+            assertFalse(gateway.prefs.contains(pendingPreference))
+            assertEquals(requestId, gateway.conversationMessages().getJSONObject(1).getString("request_id"))
+            gateway.appendCapturedConversationReply(key, runId, message, "重复响应不得覆盖", null, requestId)
+            assertEquals(saved, Gateway(context).conversationMessages().toString())
+
+            val lateMessage = "等待旧对话的回复"
+            val lateId = gateway.conversationRequestId(key, runId, lateMessage)
+            gateway.startNewConversation()
+            val newKey = gateway.conversationKey()
+            // Identical text is still a different draft after switching conversations.
+            assertTrue(gateway.prefs.edit().putString("draft_goal", lateMessage).commit())
+            val newId = gateway.conversationRequestId(newKey, "", lateMessage)
+            gateway.appendCapturedConversationReply(key, runId, lateMessage, "迟到回复归原对话", null, lateId)
+            gateway = Gateway(context)
+            assertEquals(newKey, gateway.conversationKey())
+            assertEquals(lateMessage, gateway.prefs.getString("draft_goal", ""))
+            assertEquals(newId, gateway.conversationRequestId(newKey, "", lateMessage))
+            assertFalse(gateway.prefs.contains(pendingPreference))
+            assertEquals(0, gateway.conversationMessages().length())
+            gateway.selectConversation(key)
+            assertEquals(4, gateway.conversationMessages().length())
+            assertEquals("迟到回复归原对话", gateway.conversationMessages().getJSONObject(3).getString("content"))
+            assertEquals(lateId, gateway.conversationMessages().getJSONObject(3).getString("request_id"))
+        } finally { names.forEach { base.deleteSharedPreferences(it) } }
+    }
+
     @Test fun taskCreationKeepsAReplySavedWhileTheTaskRequestIsInFlight() {
         val base = InstrumentationRegistry.getInstrumentation().targetContext
         val prefix = "conversation-race-${UUID.randomUUID()}-"; val names = mutableSetOf<String>()

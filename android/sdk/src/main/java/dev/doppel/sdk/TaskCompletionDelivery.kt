@@ -7,6 +7,8 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
+import android.media.AudioAttributes
+import android.net.Uri
 import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
@@ -18,6 +20,24 @@ import org.json.JSONObject
 
 /** Terminal delivery owns no Activity navigation and never changes the app underneath. */
 internal class TaskCompletionDelivery(private val context: Context) {
+    companion object {
+        fun registerChannels(context: Context) {
+            val notifications = context.getSystemService(NotificationManager::class.java)
+            notifications.createNotificationChannel(NotificationChannel("results", "任务结果", NotificationManager.IMPORTANCE_DEFAULT))
+            notifications.createNotificationChannel(NotificationChannel("task_pauses", "任务暂停原因", NotificationManager.IMPORTANCE_DEFAULT))
+            if (notifications.getNotificationChannel("task_completed") != null) return
+            // Preserve a previously muted result channel when introducing the separate completion category.
+            val importance = notifications.getNotificationChannel("results").importance
+            notifications.createNotificationChannel(NotificationChannel("task_completed", "任务完成", importance).apply {
+                description = "任务成功完成时的声音与振动提醒"
+                // A named resource URI survives resource ID changes between APK versions.
+                setSound(Uri.parse("android.resource://${context.packageName}/raw/${context.resources.getResourceEntryName(R.raw.task_completed)}"),
+                    AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
+                enableVibration(true)
+            })
+        }
+    }
     private val handler = androidx.core.os.HandlerCompat.createAsync(Looper.getMainLooper())
     private val prefs = context.getSharedPreferences("doppel", Context.MODE_PRIVATE)
     private val manager = context.getSystemService(WindowManager::class.java)
@@ -32,8 +52,7 @@ internal class TaskCompletionDelivery(private val context: Context) {
     }
 
     init {
-        notifications.createNotificationChannel(NotificationChannel("results", "任务结果", NotificationManager.IMPORTANCE_DEFAULT))
-        notifications.createNotificationChannel(NotificationChannel("task_pauses", "任务暂停原因", NotificationManager.IMPORTANCE_DEFAULT))
+        registerChannels(context)
         prefs.registerOnSharedPreferenceChangeListener(cleared)
     }
 
@@ -75,7 +94,16 @@ internal class TaskCompletionDelivery(private val context: Context) {
         val id = run.optString("id")
         var submitting = false
         lateinit var sheet: PauseActionSheet
-        sheet = PauseActionSheet(context, info, TaskPresentation.withSourceLabel(run, if (info.userInitiated) "任务待续" else info.category), run) { action ->
+        sheet = PauseActionSheet(context, info, TaskPresentation.withSourceLabel(run, if (info.userInitiated) "任务待续" else info.category), run,
+            openLoginSettings = {
+                if (!submitting && view === sheet && current() && prefs.getString("active_run", "") == id) {
+                    val open = Intent(context, LoginSettingsActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    run.optJSONObject("pending_request")?.optString("package_name")
+                        ?.takeIf { it.isNotBlank() && it != context.packageName }?.let { open.putExtra("package_name", it) }
+                    try { context.startActivity(open); dismiss() }
+                    catch (_: Exception) { sheet.failed("暂时无法打开登录设置，请在 Doppel 设置中打开。任务保持暂停。") }
+                }
+            }) { action ->
             if (view === sheet && (!current() || prefs.getString("active_run", "") != id)) dismiss()
             else if (!submitting && view === sheet) {
                 if (action == "resume" && !FirstUseConsent.isAccepted(context)) {
@@ -105,7 +133,7 @@ internal class TaskCompletionDelivery(private val context: Context) {
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT).apply { gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; y = dp(16) }
         try {
-            manager.addView(sheet, params); view = sheet
+            TemporaryScreenshotExclusion.addView(manager, sheet, params); view = sheet
             if (android.animation.ValueAnimator.areAnimatorsEnabled() && !hidden) {
                 sheet.alpha = 0f; sheet.translationY = dp(20).toFloat()
                 sheet.animate().alpha(1f).translationY(0f).setDuration(220).start()
@@ -141,7 +169,8 @@ internal class TaskCompletionDelivery(private val context: Context) {
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             val pending = PendingIntent.getActivity(context, id.hashCode(), open, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
             try {
-                notifications.notify(id.hashCode(), Notification.Builder(context, "results")
+                val channel = if (run.optString("status") == "completed") "task_completed" else "results"
+                notifications.notify(id.hashCode(), Notification.Builder(context, channel)
                     .setSmallIcon(R.drawable.doppel_ic_layers_2).setContentTitle(result.title)
                     .setContentText(result.text.take(160)).setStyle(Notification.BigTextStyle().bigText(result.text))
                     .setVisibility(Notification.VISIBILITY_PRIVATE).setAutoCancel(true).setContentIntent(pending).build())
@@ -175,7 +204,7 @@ internal class TaskCompletionDelivery(private val context: Context) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; y = dp(60) }
         try {
-            manager.addView(root, params); view = root
+            TemporaryScreenshotExclusion.addView(manager, root, params); view = root
             root.alpha = 0f; root.translationY = -dp(16).toFloat()
             root.animate().alpha(if (hidden) 0f else 1f).translationY(0f).setDuration(240).start()
         } catch (_: Exception) { view = null }

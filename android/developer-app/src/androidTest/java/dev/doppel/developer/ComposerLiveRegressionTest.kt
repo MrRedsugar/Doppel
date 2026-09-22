@@ -107,7 +107,7 @@ class ComposerLiveRegressionTest {
             report.put("task_elapsed_ms", SystemClock.elapsedRealtime() - started)
             assertEquals(run.optString("message"), "completed", run.optString("status"))
             InstrumentationRegistry.getArguments().getString("composer_expected_launch")?.let { expectedPackage ->
-                val stored = JSONArray(File(context.noBackupFilesDir, "direct-runs-v1.json").readText())
+                val stored = dev.doppel.sdk.SplitTaskEngine.readPersistedRuns(File(context.noBackupFilesDir, "direct-runs-v1.json").readText())
                 val own = (0 until stored.length()).map { stored.getJSONObject(it) }.single { it.getString("id") == ownRun }
                 val steps = own.optJSONArray("recent_steps") ?: JSONArray()
                 val launches = (0 until steps.length()).map { steps.getJSONObject(it).getJSONObject("receipt") }

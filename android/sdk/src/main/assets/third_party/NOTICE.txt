@@ -1,4 +1,4 @@
-Doppel Android speech runtime notices
+Doppel Android runtime notices
 
 Vosk Android 0.3.75 (com.alphacephei:vosk-android)
 Copyright 2019-2021 Alpha Cephei Inc. and Vosk contributors.
@@ -41,11 +41,6 @@ The archive is downloaded separately and is not bundled in Doppel source or APKs
 See Apache-2.0.txt for its license. Provider-hosted model updates require a new
 integrity and license check.
 
-SnakeYAML 2.4 (org.yaml:snakeyaml)
-Apache License 2.0; see Apache-2.0.txt.
-https://bitbucket.org/snakeyaml/snakeyaml/src/snakeyaml-2.4/
-Used only through SafeConstructor for bounded, data-only Skills metadata.
-
 OkHttp 4.12.0 (com.squareup.okhttp3:okhttp)
 Apache License 2.0; see Apache-2.0.txt.
 https://github.com/square/okhttp/tree/parent-4.12.0
@@ -57,3 +52,132 @@ This notice is reproduced from okhttp3/internal/publicsuffix/NOTICE in the jar.
 jsoup 1.18.3 (org.jsoup:jsoup)
 Copyright (c) 2009-2024 Jonathan Hedley <https://jsoup.org/>.
 MIT; full upstream jar license is reproduced in jsoup-LICENSE.txt.
+
+Android Hidden Api Bypass 6.1 (org.lsposed.hiddenapibypass:hiddenapibypass)
+Published by LSPosed.
+Apache License 2.0; see Apache-2.0.txt.
+https://github.com/LSPosed/AndroidHiddenApiBypass
+Used for targeted access to this process's own overlay SurfaceControls so that
+one full-display capture can exclude Doppel overlays without hiding them.
+
+open-webSearch (source adaptation; no Node.js runtime bundled)
+Copyright 2025 Open-WebSearch MCP Server Contributors.
+Apache License 2.0; see Apache-2.0.txt.
+https://github.com/Aas-ee/open-webSearch/tree/400678eac49521de8c3bb139f263c83d7300416e
+OpenWebSearchParsing.kt adapts src/engines/bing/parser.ts and the result parsing
+functions in src/engines/sogou/sogou.ts to Kotlin and jsoup.
+Doppel modifications: reuse the existing bounded HTTPS transport, enforce public
+HTTPS destinations, bound redirect decoding and output, omit browser/server
+runtimes and keyword challenge classification. See docs/developer/web-research.md.
+
+Agent Reach website channel (Kotlin source adaptation)
+Copyright (c) 2025 Agent Eyes.
+MIT; complete upstream license reproduced in agent-reach/LICENSE.
+https://github.com/Panniantong/Agent-Reach/tree/a19a171fa980a0785849596492e0af4db800c82f
+JinaReaderChannel.kt retains the bounded UTF-8 Markdown envelope adaptation
+originally derived from agent_reach/channels/web.py WebChannel.read.
+Doppel now fetches and extracts websites locally using the Jina Reader core
+and Android WebView; it no longer calls the hosted r.jina.ai website service.
+The upstream keyword challenge classifier, social/video tools, Python runtime,
+browser-cookie tools and installers are not included.
+The existing open-webSearch search-engine adaptation remains separate.
+See agent-reach/SOURCE.md and docs/developer/web-research.md.
+
+PdfBox-Android 2.0.27.0 (com.tom-roush:pdfbox-android)
+Android port by Tom Roush / PdfBox-Android Developers.
+Apache License 2.0; see Apache-2.0.txt.
+https://github.com/TomRoush/PdfBox-Android
+https://repo.maven.apache.org/maven2/com/tom-roush/pdfbox-android/2.0.27.0/
+Used unchanged for on-device PDF text extraction. No PDF contents are sent to a
+separate document conversion service.
+
+The port includes Apache PDFBox and FontBox code and bundled font/glyph data.
+Their complete LICENSE and NOTICE texts are reproduced, without edits, from the
+published Apache PDFBox / FontBox 2.0.27 jars in PDFBOX-LICENSE.txt,
+PDFBOX-NOTICE.txt, FONTBOX-LICENSE.txt, and FONTBOX-NOTICE.txt. These include the
+Adobe glyph/CMap, Unicode, Liberation font (SIL OFL), and TwelveMonkeys notices.
+Resource-specific notices also remain in the bundled AAR resource files.
+https://repo.maven.apache.org/maven2/org/apache/pdfbox/pdfbox/2.0.27/
+https://repo.maven.apache.org/maven2/org/apache/pdfbox/fontbox/2.0.27/
+
+Bouncy Castle 1.72 (org.bouncycastle:bcprov-jdk15to18,
+org.bouncycastle:bcpkix-jdk15to18, org.bouncycastle:bcutil-jdk15to18)
+Transitive dependencies of PdfBox-Android, distributed under the Bouncy Castle
+MIT-style license. See BouncyCastle-LICENSE.txt, reproduced directly from the
+published bcprov-jdk15to18 1.72 jar's org.bouncycastle.LICENSE output.
+Copyright (c) 2000-2022 The Legion of the Bouncy Castle Inc.
+https://www.bouncycastle.org/
+
+assistant-ui MessageRepository (Kotlin source adaptation)
+Copyright (c) 2025 AgentbaseAI Inc.
+MIT; complete upstream license reproduced in assistant-ui-LICENSE.txt.
+https://github.com/assistant-ui/assistant-ui/tree/5f21b37bee60458cf721b68369b251636cd939e3
+ConversationMessageRepository.kt adapts the parent/children/remembered-next/head
+algorithms, branch switching and parent-first export from
+packages/core/src/runtime/utils/message-repository.ts. Behavioral fixtures in
+ConversationMessageRepositoryTest.kt adapt the sibling, nested branch,
+export/import and long-history cases from packages/core/src/tests/MessageRepository.test.ts.
+Doppel modifications: Kotlin and copied JSON payloads; each payload represents a
+chat turn or immutable task reference. Reparenting, deletion, optimistic nodes,
+React conversion and destructive resetHead are omitted. Persistence imports
+require a leaf head, retaining all saved sibling branches. The Gateway transaction
+and task-queue integration are Doppel-specific, not supplied by assistant-ui.
+
+Apache POI 5.5.1 and centic9/poi-on-android
+Used for local DOC/DOCX/PPT/PPTX/XLS/XLSX text extraction.
+Pinned Android adapter commit a29c7a4cdd94175c2be43678c82afc818b60ff3f.
+Copyright 2015-2024 Dominik Stadler; Apache License 2.0.
+See poi-android/NOTICE.txt and the original, per-dependency LICENSE/NOTICE files
+in poi-android/. Rebuild instructions and artifact hashes accompany the library.
+https://github.com/centic9/poi-on-android
+https://poi.apache.org/
+
+DeepSeek Harness file-reference guidance (Chinese adaptation)
+Copyright (c) 2026 DeepSeek.
+MIT; complete upstream license reproduced in deepseek-harness-LICENSE.txt.
+https://github.com/deepseek-ai/deepseek-harness/tree/ddefc45fbc7f8e46dd73185e68295696d1297887
+ChatAttachmentContext.PROMPT adapts FILE_REFERENCE_PROMPT from
+packages/context/file-reference/src/index.ts: references do not imply their
+contents have been read; inspect through the file tool before claiming to have
+read them. Doppel uses conversation-owned attachment IDs rather than workspace
+paths, translates the guidance into Chinese, and retains its existing bounded
+character paging, context budget and untrusted-content rules. The Harness
+Node/Python runtime, filesystem editor and Office preview engine are not bundled
+into the Android app by this adaptation.
+
+Jina Reader Markify core (embedded browser bundle)
+Copyright 2020-2024 Jina AI Limited. Apache License 2.0.
+Unmodified src/services/markify.ts from revision
+1574bfd380d249c86c82db4dace0d9c8fe17e2b1 is compiled for the page DOM.
+https://github.com/jina-ai/reader/tree/1574bfd380d249c86c82db4dace0d9c8fe17e2b1
+See jina-reader/JINA-LICENSE.txt and jina-reader/SOURCE.md.
+Doppel's adapter removes active and form/editor content from a detached DOM,
+uses Mozilla Readability for article selection, and bounds Markdown output.
+It does not include the Jina server, Puppeteer, cloud integrations or licensed
+server assets. Rebuild source and smoke checks: tools/jina-reader-core/.
+
+Mozilla Readability 0.6.0
+Copyright (c) 2010 Arc90 Inc; Mozilla Readability contributors.
+Apache License 2.0; original license in jina-reader/READABILITY-LICENSE.txt.
+https://github.com/mozilla/readability/tree/0.6.0
+
+@nomagick/mathml-to-latex 1.5.3
+Copyright (c) 2020 Alexandre Nunes. MIT.
+Original license in jina-reader/MATHML-LICENSE.txt.
+https://github.com/nomagick/mathml-to-latex
+The published bundle includes xmldom parser code (MIT); its original license
+is reproduced in jina-reader/XMLDOM-LICENSE.txt.
+Copyright 2019-present Christopher J. Brody and other xmldom contributors;
+Copyright 2012-2017 @jindw and other contributors.
+https://github.com/xmldom/xmldom
+
+@mswjs/interceptors 0.45.0 (embedded public-network browser bundle)
+Copyright (c) 2018-present Artem Zakharchenko. MIT.
+Official FetchInterceptor and XMLHttpRequestInterceptor browser entry points.
+https://github.com/mswjs/interceptors/tree/v0.45.0
+Original license: jina-reader/MSW-INTERCEPTORS-LICENSE.txt.
+Browser dependencies @open-draft/until, outvariant, rettime, and upstream's
+embedded debug/ms code are also MIT; complete original license texts:
+jina-reader/OPEN-DRAFT-UNTIL-LICENSE.txt, jina-reader/OUTVARIANT-LICENSE.txt,
+jina-reader/RETTIME-LICENSE.txt, jina-reader/DEBUG-LICENSE.txt,
+jina-reader/MS-LICENSE.txt. See jina-reader/SOURCE.md and the build lockfile.

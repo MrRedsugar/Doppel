@@ -75,7 +75,7 @@ object AccessibilityControlPicker {
     private fun unavailable(host: AccessibilityService): String? = when {
         !FirstUseConsent.isAccepted(host) -> FirstUseConsent.REQUIRED_MESSAGE
         AutomaticUnlockSession.active || AutomaticUnlockSession.locked(host) -> "请先解锁并接管设备，再选择控件"
-        DeviceWorkerService.instance?.isPaused == false -> "请先暂停当前任务，再选择控件"
+        DeviceWorkerService.instance?.hasActiveExecution == true -> "请先暂停当前任务，再选择控件"
         else -> null
     }
     private fun toast(host: android.content.Context, message: String) { Toast.makeText(host, message, Toast.LENGTH_LONG).show() }
@@ -100,7 +100,7 @@ object AccessibilityControlPicker {
             PixelFormat.TRANSLUCENT).apply {
             gravity = Gravity.BOTTOM or Gravity.END; x = UiTheme.dp(host, 16); y = UiTheme.dp(host, 110)
         }
-        try { host.getSystemService(WindowManager::class.java).addView(button, params); launcher = button }
+        try { TemporaryScreenshotExclusion.addView(host.getSystemService(WindowManager::class.java), button, params); launcher = button }
         catch (_: Exception) { toast(host, "无法显示读取控件按钮，请检查无障碍服务"); stopNow() }
     }
     private fun capture() {

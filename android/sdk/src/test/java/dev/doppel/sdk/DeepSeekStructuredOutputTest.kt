@@ -9,7 +9,7 @@ class DeepSeekStructuredOutputTest {
     private fun wire() = JSONObject().put("response_format", SplitOutputSchema.format("primary")).also(DeepSeekStructuredOutput::prepare)
     private fun thinkingWire() = JSONObject().put("response_format", SplitOutputSchema.format("primary"))
         .put("thinking", JSONObject().put("type", "enabled")).also(DeepSeekStructuredOutput::prepare)
-    private fun result() = JSONObject("""{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"a","type":"function","function":{"name":"doppel_a_ab_v3","arguments":"{\"decision\":{\"kind\":\"ask_user\",\"message\":\"help\"},\"state\":null}"}}]}}]}""")
+    private fun result() = JSONObject("""{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"a","type":"function","function":{"name":"doppel_a_ab_v11","arguments":"{\"decision\":{\"kind\":\"ask_user\",\"message\":\"help\"},\"state\":null}"}}]}}]}""")
 
     @Test fun preservesCanonicalSchemaAndProviderDiscriminatorsWithoutUnsupportedBounds() {
         val format = SplitOutputSchema.format("primary")
@@ -23,7 +23,12 @@ class DeepSeekStructuredOutputTest {
         val schema = function.getJSONObject("parameters")
         assertFalse(schema.getBoolean("additionalProperties"))
         val branches = schema.getJSONObject("properties").getJSONObject("decision").getJSONArray("anyOf")
-        assertEquals(format.getJSONObject("json_schema").getJSONObject("schema").getJSONObject("properties").getJSONObject("decision").getJSONArray("anyOf").length(), branches.length())
+        val originalBranches = format.getJSONObject("json_schema").getJSONObject("schema").getJSONObject("properties").getJSONObject("decision").getJSONArray("anyOf")
+        assertEquals(originalBranches.length(), branches.length())
+        repeat(branches.length()) { index ->
+            assertEquals(originalBranches.getJSONObject(index).getJSONObject("properties").getJSONObject("kind").getJSONArray("enum").toString(),
+                branches.getJSONObject(index).getJSONObject("properties").getJSONObject("kind").getJSONArray("enum").toString())
+        }
         assertFalse(schema.toString().contains("\"maxLength\"")); assertFalse(schema.toString().contains("\"maxItems\""))
         assertTrue(schema.toString().contains("\"maximum\"")); assertTrue(schema.toString().contains("\"enum\""))
         assertEquals("null", schema.getJSONObject("properties").getJSONObject("state").getJSONArray("anyOf").getJSONObject(1).getString("type"))

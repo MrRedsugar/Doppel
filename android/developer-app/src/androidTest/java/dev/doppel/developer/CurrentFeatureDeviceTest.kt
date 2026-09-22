@@ -97,8 +97,6 @@ class CurrentFeatureDeviceTest {
         assertFalse("Never interrupt existing tasks", DirectRuntime.get(context).hasUnfinishedRun())
         assertFalse("An executing worker must be left alone", DeviceWorkerService.instance?.isPaused == false)
         assertFalse("Close the existing voice editor", VoiceActivity.isVisible)
-        assertFalse("Preserve the current demonstration", DemonstrationSession.active)
-        assertNull("Preserve pending user evidence", AppLearning(context).pendingEvidence())
         assertTrue("Preserve pending voice submission", Gateway(context).prefs.getString("voice_pending_worker_run", "").isNullOrBlank())
         assertTrue(Settings.canDrawOverlays(context))
         assertTrue(context.getSystemService(PowerManager::class.java).isInteractive)
@@ -226,108 +224,4 @@ class CurrentFeatureDeviceTest {
         }
     }
 
-    @Test fun actualSettingsDemonstrationGeneratesReviewsSavesAndRemovesOwnSkill() {
-        assumeTrue(args.getString("current_feature_demo") == "true")
-        idle()
-        if(Build.VERSION.SDK_INT in 26..29 && !LegacyScreenCaptureService.isReady) {
-            assertEquals("Explicit opt-in is needed to grant this QA screen-sharing session","true",args.getString("current_feature_consent"))
-            LegacyCaptureConsent.authorize(inst)
-        }
-        val learning = AppLearning(context); val beforeRuns = runIds()
-        val uniqueTitle = "真实示教验收-" + UUID.randomUUID().toString().take(8)
-        val goal = "$uniqueTitle：打开网络和互联网，再返回设置首页，不修改设置"
-        val existing = learning.manual.list().getJSONArray("items")
-        val beforeNames = (0 until existing.length()).map { existing.getJSONObject(it).getString("name") }.toSet()
-        val result = JSONObject().put("ok",false).put("model_calls_requested",args.getString("current_feature_models") == "true")
-            .put("input_actions","instrumentation accessibility click and global Back in actual Settings, not a human participant")
-        var ownsDemo = false; var sourceId: String? = null
-        try {
-            activity = inst.startActivitySync(Intent(context,LearningActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            click("手动示范一次")
-            val settingsLabel = context.packageManager.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER),0)
-                .first { it.activityInfo.packageName=="com.android.settings" }.loadLabel(context.packageManager).toString()
-            for(attempt in 0..15) {
-                if(visibleNodes().any {it.text?.toString()==settingsLabel}) break
-                val scroll=visibleNodes().firstOrNull {it.isScrollable && it.packageName?.toString()==context.packageName}
-                    ?: error("The application picker has no scrollable list")
-                check(scroll.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)) {"Settings is not in the app picker"}
-                Thread.sleep(150)
-            }
-            shot("demonstration-app-picker")
-            click(settingsLabel)
-            await("Real demonstration is active") { DemonstrationSession.active }; ownsDemo = true
-            // Read only the actual session's identity so failure cleanup cannot delete another draft.
-            inst.runOnMainSync {
-                val field=DemonstrationSession::class.java.getDeclaredField("run").apply { isAccessible=true }
-                sourceId=(field.get(DemonstrationSession) as JSONObject).getString("source_id")
-            }
-            assertEquals("com.android.settings",DemonstrationSession.status().getString("package_name"))
-            await("Actual Settings visible") { automation.rootInActiveWindow?.packageName?.toString()=="com.android.settings" }
-            await("At least one actual captured frame",20000) { DemonstrationSession.status().optInt("screenshots")>0 }
-            // This tall display fits the whole Settings homepage, so scrolling is a no-op.
-            // Navigate an actual read-only page and verify its content before recording Back.
-            click("网络和互联网")
-            await("Network detail page is visible") { visibleNodes().any { it.text?.toString()=="WLAN" } }
-            Thread.sleep(2300); shot("settings-network")
-            assertTrue(automation.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK))
-            await("Returned to Settings homepage") { visibleNodes().any { it.text?.toString()=="在设置中搜索" } }
-            Thread.sleep(2300); shot("settings-demonstration")
-            val review = inst.addMonitor(LearningActivity::class.java.name,null,false)
-            try {
-                click("演示结束")
-                activity = requireNotNull(inst.waitForMonitorWithTimeout(review,20000)) { "Demonstration review did not open" }
-            } finally { inst.removeMonitor(review) }
-            val pending = requireNotNull(learning.pendingEvidence());sourceId=pending.getString("source_id");ownsDemo = false
-            assertEquals("human_demonstration",pending.getString("origin"))
-            assertTrue(pending.getJSONArray("screenshots").length()>0)
-            val events=pending.getJSONArray("events")
-            assertTrue("Record actual Settings navigation", (0 until events.length()).any {
-                events.getJSONObject(it).optString("kind") in setOf("observed_click","window_changed") && events.getJSONObject(it).optString("package_name")=="com.android.settings"
-            })
-            setField("例如：在设置中开启深色模式",goal)
-            setField("补充截图没记录到的步骤或结果（可选）","本次QA通过无障碍点击打开系统设置的网络和互联网页面，再通过系统返回回到设置首页，未修改任何设置。不是人工参与实验；轨迹只证明这些页面上的可见操作。")
-            await("Review must be visibly foreground, not merely constructed") {
-                automation.rootInActiveWindow?.packageName?.toString()==context.packageName &&
-                    visibleNodes().any {it.text?.toString()=="刚才完成了什么任务？"}
-            }
-            automation.waitForIdle(300,3000)
-            result.put("source_id",sourceId).put("observed_events",events.length())
-                .put("captured_frames",pending.getJSONArray("screenshots").length())
-            if(args.getString("current_feature_models") != "true") {
-                shot("demonstration-review")
-                assertEquals(beforeRuns,runIds())
-                result.put("ok",true).put("model_generation_tested",false).put("saved_skill",false)
-                    .put("coverage","actual_capture_and_review_only")
-                return
-            }
-            click("生成 Skill 草稿")
-            await("Configured real model returns editable draft",180000) { hasText("预览并编辑 Skill") }
-            assertTrue(requireNotNull(learning.pendingEvidence()).has("generated_draft"))
-            setField("标题",uniqueTitle);shot("demonstration-model-draft");click("保存 Skill")
-            await("Own reviewed skill saved") {
-                val items=learning.manual.list().getJSONArray("items")
-                (0 until items.length()).any { items.getJSONObject(it).optString("title")==uniqueTitle && items.getJSONObject(it).optString("name") !in beforeNames }
-            }
-            assertNull(learning.pendingEvidence());assertEquals(beforeRuns,runIds())
-            result.put("ok",true).put("source_id",sourceId).put("observed_events",events.length())
-                .put("captured_frames",pending.getJSONArray("screenshots").length()).put("saved_and_cleanup_requested",true)
-        } catch(error:Throwable) {
-            result.put("failure_type",error.javaClass.simpleName)
-            runCatching {shot("demonstration-failure")}
-            throw error
-        } finally {
-            if(ownsDemo) inst.runOnMainSync { DemonstrationSession.cancel() }
-            val pending=learning.pendingEvidence()
-            if(pending!=null && ((sourceId!=null && pending.optString("source_id")==sourceId) || pending.optString("user_reported_goal")==goal)) learning.clearPendingEvidence()
-            val items=learning.manual.list().getJSONArray("items")
-            repeat(items.length()) { i -> val item=items.getJSONObject(i)
-                if(item.optString("title")==uniqueTitle && item.optString("name") !in beforeNames) learning.manual.delete(item.getString("name"))
-            }
-            val remaining=learning.manual.list().getJSONArray("items")
-            val ownRemoved=(0 until remaining.length()).none { remaining.getJSONObject(it).optString("title")==uniqueTitle && remaining.getJSONObject(it).optString("name") !in beforeNames }
-            result.put("own_skill_removed",ownRemoved)
-            closeActivity();File(folder,"demonstration.json").writeText(result.toString(2))
-            assertTrue("Only the invocation-owned QA skill is removed",ownRemoved)
-        }
-    }
 }

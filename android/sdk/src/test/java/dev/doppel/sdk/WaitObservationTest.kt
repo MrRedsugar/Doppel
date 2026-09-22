@@ -51,7 +51,8 @@ class WaitObservationTest {
     @Test fun normalActionClearsWaitStreakAndFreshCaptureStillPrecedesGrounding() {
         begin();waitAndCapture("ready")
         e.accept(e.takeWork()!!,reply(JSONObject().put("kind","tap")
-            .put("target","页面底部可操作的入口").put("expected","进入下一页面").put("screen_context","")))
+            .put("target","页面底部可操作的入口").put("expected","进入下一页面").put("screen_context","")
+            .put("request_login_code",JSONObject.NULL)))
         screen("ready-for-b");val b=e.takeWork()!!;assertTrue(b.grounding)
         e.accept(b,JSONObject().put("choices",JSONArray().put(JSONObject().put("finish_reason","stop")
             .put("message",JSONObject().put("content","""{"result":{"status":"not_found","reason":"入口已消失"}}""")))))

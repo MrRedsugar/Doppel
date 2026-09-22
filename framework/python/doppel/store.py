@@ -19,11 +19,26 @@ class Store:
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS devices(id TEXT PRIMARY KEY, owner TEXT NOT NULL, installation TEXT NOT NULL, name TEXT NOT NULL, last_seen TEXT, UNIQUE(owner,installation));
             CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, owner TEXT NOT NULL, device_id TEXT NOT NULL REFERENCES devices(id), payload TEXT NOT NULL, observation TEXT, token_hash TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS run_submissions(owner TEXT NOT NULL,device_id TEXT NOT NULL,request_id TEXT NOT NULL,run_id TEXT NOT NULL,fingerprint TEXT NOT NULL,summary TEXT NOT NULL DEFAULT '{}',PRIMARY KEY(owner,device_id,request_id));
+            CREATE TABLE IF NOT EXISTS submission_retention(owner TEXT NOT NULL,device_id TEXT NOT NULL,minimum_issued_at INTEGER NOT NULL,PRIMARY KEY(owner,device_id));
             CREATE TABLE IF NOT EXISTS commands(id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), payload TEXT NOT NULL, state TEXT NOT NULL, result TEXT, created_at TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS commands_run ON commands(run_id,state);
             CREATE TABLE IF NOT EXISTS events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id),kind TEXT NOT NULL,message TEXT NOT NULL,data TEXT NOT NULL,created_at TEXT NOT NULL);
             PRAGMA user_version=1;
         """)
+        # Submission receipts outlive display history; deleting a run must not allow replay.
+        if self.db.execute("PRAGMA foreign_key_list(run_submissions)").fetchall():
+            self.db.executescript("""
+                BEGIN IMMEDIATE;
+                ALTER TABLE run_submissions RENAME TO run_submissions_legacy;
+                CREATE TABLE run_submissions(owner TEXT NOT NULL,device_id TEXT NOT NULL,request_id TEXT NOT NULL,run_id TEXT NOT NULL,fingerprint TEXT NOT NULL,summary TEXT NOT NULL DEFAULT '{}',PRIMARY KEY(owner,device_id,request_id));
+                INSERT INTO run_submissions(owner,device_id,request_id,run_id,fingerprint,summary)
+                    SELECT s.owner,s.device_id,s.request_id,s.run_id,s.fingerprint,r.payload FROM run_submissions_legacy s JOIN runs r ON r.id=s.run_id;
+                DROP TABLE run_submissions_legacy;
+                COMMIT;
+            """)
+        if "issued_at_ms" not in {row["name"] for row in self.db.execute("PRAGMA table_info(run_submissions)")}:
+            self.db.execute("ALTER TABLE run_submissions ADD COLUMN issued_at_ms INTEGER")
 
     @contextmanager
     def transaction(self):

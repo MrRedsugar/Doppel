@@ -37,7 +37,7 @@ internal class TaskReviewAssistant(
             }
         }
 
-        private fun compact(review: JSONObject): JSONObject = JSONObject().apply {
+        internal fun compact(review: JSONObject): JSONObject = JSONObject().apply {
             put("run_id", safe(review.optString("run_id"), 120))
             put("goal", safe(review.optString("goal"), 1500))
             put("status", safe(review.optString("status"), 40))
@@ -61,6 +61,16 @@ internal class TaskReviewAssistant(
             })
             put("task_state", review.optJSONObject("task_state")?.let { safe(it.toString(), 5000) } ?: "{}")
             review.optJSONObject("metrics")?.let { put("metrics", safe(it.toString(), 600)) }
+        }
+
+        /** Shared chat uses the same redacted evidence, with a smaller per-message budget. */
+        internal fun chatEvidence(review: JSONObject): JSONObject = compact(review).apply {
+            remove("errors") // The timeline already includes these events.
+            remove("metrics")
+            val events = getJSONArray("timeline")
+            while (events.length() > 12) events.remove(0)
+            put("task_state", optString("task_state").take(1600))
+            while (toString().length > 6000 && events.length() > 0) events.remove(0)
         }
 
         private fun parsed(content: String): JSONObject {

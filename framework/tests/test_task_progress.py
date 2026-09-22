@@ -22,6 +22,7 @@ def setup(tmp_path):
     runtime = DoppelRuntime(RuntimeConfig(data_dir=tmp_path, auto_start=False))
     device = runtime.register_device("alice", "progress-phone", "Fixture")
     run = runtime.create_run("alice", device.id, "查看手机型号", "full", conversation_enabled=False, source="schedule")
+    run = runtime.start_queued("alice",run.id)
     app = FastAPI()
     app.include_router(create_router(runtime, lambda: "alice"))
     client = TestClient(app)

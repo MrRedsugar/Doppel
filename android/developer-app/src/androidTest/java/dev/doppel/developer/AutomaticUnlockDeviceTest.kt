@@ -1,3 +1,5 @@
+@file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+
 package dev.doppel.developer
 
 import android.accessibilityservice.AccessibilityService
@@ -25,6 +27,11 @@ import androidx.test.platform.app.InstrumentationRegistry
 import dev.doppel.sdk.DeviceWorkerService
 import dev.doppel.sdk.DoppelAccessibilityService
 import dev.doppel.sdk.TaskControl
+import dev.doppel.sdk.SdkCompanionService
+import dev.doppel.sdk.FirstUseConsent
+import dev.doppel.sdk.companion.CompanionEndpoint
+import dev.doppel.sdk.companion.CompanionLanPresence
+import dev.doppel.sdk.companion.CompanionPairings
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
@@ -112,7 +119,7 @@ class AutomaticUnlockDeviceTest {
         try { return automation.injectInputEvent(event, true) }
         finally { event.recycle() }
     }
-    private fun holdTakeover(millis: Long, finishCaptureDuringHandoff: Boolean = false, startGestureWhileHeld: Boolean = false): Boolean {
+    private fun holdTakeover(millis: Long, finishCaptureDuringHandoff: Boolean = false, startGestureWhileHeld: Boolean = false, action: String = "pause"): Boolean {
         var button: AccessibilityNodeInfo? = null
         await("The normal shield must restore touch handling and expose one takeover control", 4000) {
             var restored = false
@@ -121,7 +128,7 @@ class AutomaticUnlockDeviceTest {
                 restored = call(shield, "getVisible") == true && !passing && call(shield, "isAuthenticating") == false
             }
             if (restored) button = nodes().filter {
-                it.packageName?.toString() == context.packageName && it.text?.toString() == "接管" && it.isEnabled
+                it.packageName?.toString() == context.packageName && it.text?.toString() == (if (action == "cancel") "停止" else "接管") && it.isEnabled
             }.singleOrNull()
             restored && button != null
         }
@@ -239,9 +246,10 @@ class AutomaticUnlockDeviceTest {
         assertTrue(nodes().single { it.packageName?.toString() == context.packageName && it.text?.toString() in setOf("确认并接管", "确认并结束") }
             .performAction(AccessibilityNodeInfo.ACTION_CLICK))
     }
-    private fun awaitLocalAuthentication(generation: Long) {
+    private fun awaitLocalAuthentication(generation: Long, action: String = "pause") {
         await("Long hold must open the app's local password form") {
-            authenticating() && nodes().any { it.packageName?.toString() == context.packageName && it.text?.toString() == "验证后接管" }
+            authenticating() && nodes().any { it.packageName?.toString() == context.packageName && it.text?.toString() ==
+                (if (action == "cancel") "验证后结束任务" else "验证后接管") }
         }
         assertTrue("An unverified handoff must not relock the phone", unlocked())
         assertTrue("The protection window remains installed while authenticating", shieldVisible())
@@ -456,6 +464,106 @@ class AutomaticUnlockDeviceTest {
             cleanupError?.let {
                 if (failure != null) failure!!.addSuppressed(it) else throw it
             }
+        }
+    }
+
+    /** Real keyguard and long holds; the LAN lease alone is injected, not claimed as a physical LAN test. */
+    @Test fun lanOptInHandoffAndPasswordFallback() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("lan_handoff_test") == "true")
+        assertTrue("Use a disposable app ID, never user history", context.packageName == "dev.doppel.lanqa")
+        assertEquals(34, Build.VERSION.SDK_INT)
+        assertEquals("1", shell("getprop ro.boot.qemu"))
+        noTask(); assertFalse(active()); assertTrue(unlocked() && lock.isDeviceSecure)
+        assertNull(SdkCompanionService.instance)
+        assertFalse(call(credentials, "hasSaved", context) as Boolean)
+        val state = context.getSharedPreferences("doppel_automatic_unlock_state", Context.MODE_PRIVATE)
+        assertTrue(state.all.isEmpty())
+        val report = JSONObject().put("ok", false).put("model_requests", 0).put("submitted_tasks", 0)
+            .put("scope", "real keyguard, production settings/session/shield; injected authenticated presence lease, not physical LAN")
+        val folder = File(context.getExternalFilesDir(null), "lan-handoff-verification").apply { mkdirs() }
+        val oldInfo = automation.serviceInfo
+        var activity: android.app.Activity? = null
+        var pairs: CompanionPairings? = null
+        var pairId: String? = null
+        try {
+            automation.serviceInfo = automation.serviceInfo.apply {
+                flags = flags or AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+            }
+            if (DoppelAccessibilityService.instance == null) AccessibilityServiceTestBinding.rebindAlreadyEnabled(inst)
+            assertNotNull(DoppelAccessibilityService.instance)
+            FirstUseConsent.accept(context)
+            activity = inst.startActivitySync(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            inst.runOnMainSync { SdkCompanionService.enable(context) }
+            await("LAN service must listen on the emulator network", 15000) { SdkCompanionService.instance?.phoneState()?.optBoolean("service_enabled") == true }
+            val service = requireNotNull(SdkCompanionService.instance)
+            val endpoint = service.javaClass.getDeclaredField("endpoint").apply { isAccessible = true }.get(service) as CompanionEndpoint
+            val pairings = endpoint.javaClass.getDeclaredField("pairs").apply { isAccessible = true }.get(endpoint) as CompanionPairings
+            pairs = pairings
+            assertEquals(0, pairings.phoneState().getJSONArray("pairs").length())
+            val invitation = pairings.openWindow()
+            val request = pairings.request(invitation.getString("pairing_id"), invitation.getString("secret"), "isolated-LAN-handoff-fixture")
+            val requestId = request.getString("pairing_request_id")
+            pairings.decide(requestId, true, setOf("state"))
+            val granted = pairings.poll(requestId, request.getString("poll_token")).body
+            val bearer = granted.getString("bearer")
+            pairId = pairings.activate(requestId, bearer).getString("pair_id")
+            val auth = pairings.authenticate(bearer)
+            val presence = endpoint.javaClass.getDeclaredField("presence").apply { isAccessible = true }.get(endpoint) as CompanionLanPresence
+            val kind = Class.forName("dev.doppel.sdk.AutomaticUnlockCredentials\$Kind").enumConstants.single { (it as Enum<*>).name == "PIN" }
+            val pin = "681429".toCharArray()
+            try { call(credentials, "save", context, kind, pin) } finally { pin.fill('\u0000') }
+            assertEquals(false, call(credentials, "isLanHandoffEnabled", context))
+            fun runCase(name: String, enabled: Boolean, nearby: Boolean, bypass: Boolean, action: String = "pause", expire: Boolean = false, revoke: Boolean = false) {
+                call(credentials, "setLanHandoffEnabled", context, enabled)
+                presence.clear()
+                lockScreen()
+                val key = "lan-$name-${UUID.randomUUID()}"
+                val ready = AtomicInteger()
+                assertEquals(true, call(session, "prepare", context, key, { true }, { ready.incrementAndGet(); Unit }))
+                await("$name: actual automatic unlock must complete", 22000) { ready.get() == 1 }
+                call(session, "dispatching", key)
+                shell("input keyevent 3")
+                if (nearby) presence.update(auth, true)
+                if (revoke) pairings.revoke(requireNotNull(pairId))
+                if (expire) Thread.sleep(9000) // Expires during the subsequent 3-second hold, before action drain.
+                val generation = TaskControl.currentGeneration()
+                if (bypass) {
+                    holdTakeover(120)
+                    assertTrue("A short hold must not take over even with nearby PC", active() && !authenticating())
+                    assertEquals(generation, TaskControl.currentGeneration())
+                }
+                holdTakeover(3200, finishCaptureDuringHandoff = true, action = action)
+                if (bypass) {
+                    await("$name: nearby handoff must release shield without password") { !active() }
+                    assertFalse(authenticating()); assertFalse(shieldVisible())
+                    assertNotEquals(generation, TaskControl.currentGeneration())
+                } else {
+                    awaitLocalAuthentication(generation, action)
+                    assertTrue("$name: fallback must retain the real session", active() && unlocked())
+                    submitLocalPassword("681429")
+                    await("$name: owner password must still hand off") { !active() }
+                }
+                Thread.sleep(1300)
+                assertTrue("$name: takeover must not relock", unlocked())
+                noTask()
+                report.put(name, true)
+                File(folder, "result.json").writeText(report.toString(2))
+            }
+            runCase("default_off_requires_password", false, true, false)
+            runCase("enabled_without_presence_requires_password", true, false, false)
+            runCase("nearby_takeover_after_operation_drain", true, true, true)
+            runCase("lease_expired_during_hold_requires_password", true, true, false, expire = true)
+            runCase("stop_still_requires_password", true, true, false, action = "cancel")
+            runCase("revoked_pair_requires_password", true, true, false, revoke = true)
+            report.put("ok", true)
+        } finally {
+            if (active()) { call(session, "interrupted"); await("Clean up only this isolated session") { !active() } }
+            unlockNormally()
+            call(credentials, "clear", context)
+            pairId?.let { pairs?.revoke(it) }
+            inst.runOnMainSync { SdkCompanionService.disable(context); activity?.finish() }
+            automation.serviceInfo = oldInfo
+            File(folder, "result.json").writeText(report.toString(2))
         }
     }
 

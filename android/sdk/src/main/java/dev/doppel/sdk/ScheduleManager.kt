@@ -58,29 +58,12 @@ class ScheduleManager private constructor(context: Context) {
             System.currentTimeMillis() - due <= ScheduleEngine.GRACE_MS && job.optString("binding") == binding() && conflictVersion(job) == version
     }.getOrDefault(false)
 
-    /** Explicit notification choice. This path cannot auto-unlock a device that becomes locked. */
+    /** Compatibility for an already issued choice: admission now joins the same FIFO. */
     internal fun continueConflict(id: String, version: String): Boolean {
-        if (!isConflictCurrent(id, version) || AutomaticUnlockSession.active ||
-            AutomaticTaskNotice.localBlockReason(context) != null || !gateway.prefs.getString("active_run", "").isNullOrBlank()) return false
-        val ticket = TaskControl.currentGeneration()
-        val connection = AutomaticTaskNotice.connectionStamp(context)
+        if (!isConflictCurrent(id, version)) return false
         io.execute {
-            var approvedDue: Long? = null
-            try {
-                check(isConflictCurrent(id, version) && TaskControl.isCurrent(ticket) && connection == AutomaticTaskNotice.connectionStamp(context) &&
-                    !AutomaticUnlockSession.active && AutomaticTaskNotice.localBlockReason(context) == null && gateway.prefs.getString("active_run", "").isNullOrBlank()) { "设备或计划已变化，自动任务未启动" }
-                approvedDue = engine.control(id, "execute").getLong("next_due_ms")
-                engine.tick(port(allowAutomaticUnlock = false), onlyId = id)
-                // A failed immediate choice must not leave a stored approval that unlocks later.
-                if (isConflictCurrent(id, version)) {
-                    engine.clearManualDecision(id, approvedDue)
-                    main.post { android.widget.Toast.makeText(context, "设备状态已变化，这次自动任务未启动", android.widget.Toast.LENGTH_LONG).show() }
-                }
-                notifyWaiting(); arm(false)
-            } catch (error: Exception) {
-                approvedDue?.let { due -> runCatching { engine.clearManualDecision(id, due) } }
-                main.post { android.widget.Toast.makeText(context, error.message ?: "自动任务未启动", android.widget.Toast.LENGTH_LONG).show() }
-            }
+            runCatching { if (isConflictCurrent(id, version)) engine.tick(port(), onlyId = id) }
+            notifyWaiting(); arm(false)
         }
         return true
     }
@@ -176,104 +159,27 @@ class ScheduleManager private constructor(context: Context) {
             android.util.Log.w("DoppelSchedule", "System wakeup unavailable; plan remains saved and foreground checks remain available")
         return result
     }
-    private fun ready(job: JSONObject, ownGate: Boolean = false, manualDecision: Boolean = false, allowAutomaticUnlock: Boolean = true): String? {
-        val unlockKey = SchedulePromptOverlay.key(job)
-        fun busy(runId: String): String {
-            if (runId.isNotBlank()) AutomaticTaskConflict.offerSchedule(context, runId, job)
-            return "device_busy"
-        }
-        val active = gateway.prefs.getString("active_run", "").orEmpty()
-        if (AutomaticUnlockSession.active && !AutomaticUnlockSession.matches(unlockKey)) return busy(active)
-        if (AutomaticUnlockSession.matches(unlockKey) && AutomaticUnlockSession.isUnlocking) return "device_unlocking"
-        val localBlock = AutomaticTaskNotice.localBlockReason(context, ownGate)
-        if (localBlock != null && !(localBlock == "device_locked" && allowAutomaticUnlock && AutomaticUnlockCredentials.isEnabled(context))) return localBlock
-        if (!gateway.isConnected() || job.optString("device_id") != gateway.prefs.getString("device_id", "")) return "connection_changed"
-        if (job.optString("binding") != binding()) return "connection_changed"
+    /** Admission does not inspect screen ownership: execution checks belong to the queue head. */
+    private fun ready(job: JSONObject): String? {
+        if (!FirstUseConsent.isAccepted(context) || !ReleaseIntegrity.isTrusted(context)) return "consent_required"
+        if (!gateway.isConnected() || job.optString("device_id") != gateway.prefs.getString("device_id", "") ||
+            job.optString("binding") != binding()) return "connection_changed"
         if (runCatching { validateDirectScope(job) }.isFailure) return "unsupported_direct_scope"
-        if (gateway.isDirectMode() && DirectRuntime.get(context).hasUnfinishedRun()) return busy(active)
-        val runs = gateway.request("GET", "/runs").getJSONArray("items")
-        var activeStatus: String? = null
-        for (i in 0 until runs.length()) {
-            val run = runs.getJSONObject(i)
-            if (run.optString("id") == active) activeStatus = run.optString("status")
-            if (run.optString("device_id") == job.getString("device_id") && run.optString("status") !in setOf("completed", "failed", "cancelled")) return busy(run.optString("id"))
-        }
-        // The gateway may return only its most recent runs; absence still requires a lookup.
-        if (active.isNotBlank() && (activeStatus ?: gateway.request("GET", "/runs/$active").optString("status")) !in setOf("completed", "failed", "cancelled")) return busy(active)
-        if (AutomaticUnlockSession.locked(context)) {
-            val connection = AutomaticTaskNotice.connectionStamp(context)
-            val started = AutomaticUnlockSession.prepare(context, unlockKey, valid = {
-                val saved = runCatching { engine.get(job.getString("id")) }.getOrNull()
-                saved?.optBoolean("enabled") == true && SchedulePromptOverlay.key(saved) == unlockKey &&
-                    connection == AutomaticTaskNotice.connectionStamp(context)
-            }, ready = { tick {} }, onAlreadyUnlocked = { tick {} })
-            if (!started && !AutomaticUnlockSession.locked(context)) return if (manualDecision || ownGate) null else "schedule_countdown"
-            return if (started) "device_unlocking" else "device_locked"
-        }
-        if (AutomaticUnlockSession.approved(unlockKey)) return null
-        if (!manualDecision && !ownGate && !SchedulePromptOverlay.announced(job)) {
-            return "schedule_countdown"
-        }
         return null
     }
-    private fun port(allowAutomaticUnlock: Boolean = true) = object : SchedulePort {
-        private var ticket = 0L
-        private var previousActive = ""
-        private var ownsGate = false
-        private var manualDecision = false
-        private var connection = ""
-        private var expectedJob: JSONObject? = null
-        private var started = false
-        override fun readiness(job: JSONObject): String? = try {
-            manualDecision = job.has("manual_execute_due_ms") && job.optLong("manual_execute_due_ms") == job.optLong("next_due_ms")
-            val reason = ready(job, manualDecision = manualDecision, allowAutomaticUnlock = allowAutomaticUnlock)
-            if (reason == null) {
-                ticket = AutomaticUnlockSession.generation(SchedulePromptOverlay.key(job)) ?: if (manualDecision) TaskControl.currentGeneration() else SchedulePromptOverlay.generation(job) ?: error("预告已取消")
-                connection = AutomaticTaskNotice.connectionStamp(context)
-                // ScheduleEngine advances next_due_ms before calling create(). Preserve the announced occurrence.
-                expectedJob = JSONObject(job.toString())
-            }
-            reason
-        } catch (_: Exception) { "device_offline" }
+    private fun port() = object : SchedulePort {
+        override fun readiness(job: JSONObject): String? = try { ready(job) } catch (_: Exception) { "device_offline" }
         override fun status(runId: String): String = gateway.runStatus(runId)
         override fun create(job: JSONObject): String {
-            check(TaskSubmissionGate.creating.compareAndSet(false, true)) { "Another task is being created" }; ownsGate = true
-            check(TaskControl.isCurrent(ticket) && connection == AutomaticTaskNotice.connectionStamp(context)) { "Automatic task context changed" }
-            expectedJob?.let { AutomaticUnlockSession.dispatching(SchedulePromptOverlay.key(it)) }
-            check(ready(expectedJob ?: error("Missing readiness check"), true, manualDecision, allowAutomaticUnlock) == null) { "Device readiness changed" }
-            previousActive = gateway.prefs.getString("active_run", "").orEmpty()
-            // Freeze an idle poller during creation so it cannot execute before publication.
-            DeviceWorkerService.instance?.suspendLocally()
-            check(TaskControl.isCurrent(ticket)) { "User took over before task creation" }
-            check(job.optString("binding") == binding() && connection == AutomaticTaskNotice.connectionStamp(context) &&
-                AutomaticTaskNotice.localBlockReason(context, true) == null && TaskControl.isCurrent(ticket)) { "Device changed before task creation" }
+            check(ready(job) == null) { "Automatic task context changed" }
             val body = JSONObject().put("device_id", job.getString("device_id")).put("goal", job.getString("goal"))
                 .put("mode", job.getString("mode")).put("allowed_packages", job.getJSONArray("allowed_packages"))
-                // Schedules create executable task records only; they must
-                // never appear in or advance the conversational thread.
-                .put("conversation_enabled", false).put("source", "schedule")
+                .put("conversation_enabled", false).put("source", "schedule").put("request_id", job.getString("request_id"))
+                .put("source_metadata", JSONObject().put("schedule_id", job.getString("id"))
+                    .put("scheduled_at_ms", job.getLong("next_due_ms")))
             return gateway.request("POST", "/runs", body).getString("id")
         }
-        override fun start(runId: String) {
-            // A request may finish after the user locks the phone or changes the connection.
-            if (connection != AutomaticTaskNotice.connectionStamp(context)) return
-            synchronized(gateway.prefs) {
-                check(gateway.prefs.getString("active_run", "").orEmpty() == previousActive) { "Active task changed" }
-                check(gateway.prefs.edit().putString("active_run", runId).commit()) { "Task reference was not saved" }
-            }
-            expectedJob?.let { AutomaticUnlockSession.bindRun(SchedulePromptOverlay.key(it), runId) }
-            if (!TaskControl.isCurrent(ticket) || AutomaticTaskNotice.localBlockReason(context, true) != null) {
-                runCatching { gateway.request("POST", "/runs/$runId/pause") }
-                return
-            }
-            try { check(TaskControl.startWorker(context, ticket)) { "User took over" }; started = true }
-            catch (error: Exception) { runCatching { gateway.request("POST", "/runs/$runId/pause") }; throw error }
-        }
-        override fun finishDispatch() { release() }
-        private fun release() {
-            if (ownsGate) { ownsGate = false; TaskSubmissionGate.creating.set(false) }
-            if (!started) expectedJob?.let { AutomaticUnlockSession.dispatchFailed(SchedulePromptOverlay.key(it)) }
-        }
+        override fun start(runId: String) { TaskControl.wakeQueue(context) }
     }
     private fun validateDirectScope(payload: JSONObject) {
         if (!gateway.isDirectMode()) return
@@ -282,19 +188,15 @@ class ScheduleManager private constructor(context: Context) {
     }
     private fun notifyWaiting() {
         val items = engine.list().getJSONArray("items")
-        val prompt = (0 until items.length()).map { items.getJSONObject(it) }.firstOrNull {
-            it.optBoolean("enabled") && it.optString("waiting_reason") in setOf("user_active", "schedule_countdown")
-        }
-        SchedulePromptOverlay.update(context, prompt)
         val waiting = (0 until items.length()).map { items.getJSONObject(it) }
-            .any { it.optBoolean("enabled") && it.optString("waiting_reason") !in setOf("", "null", "device_busy") }
+            .any { it.optString("waiting_reason") !in setOf("", "null", "device_busy") }
         val manager = context.getSystemService(NotificationManager::class.java)
         if (!waiting) { manager.cancel(JOB_ID); return }
         manager.createNotificationChannel(NotificationChannel("schedules", "定时任务", NotificationManager.IMPORTANCE_DEFAULT))
         if (!manager.areNotificationsEnabled()) return
         val open = PendingIntent.getActivity(context, JOB_ID, Intent(context, ScheduleActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         manager.notify(JOB_ID, Notification.Builder(context, "schedules").setSmallIcon(UiIcons.history)
-            .setContentTitle("定时任务正在等待").setContentText("请亮屏解锁，可选择执行、推迟或跳过。超时会记录错过原因。")
+            .setContentTitle("定时任务正在等待").setContentText("请查看计划的等待原因；成功入队后会按顺序执行。")
             .setVisibility(Notification.VISIBILITY_PRIVATE).setContentIntent(open).setOnlyAlertOnce(true).setAutoCancel(true).build())
     }
 }

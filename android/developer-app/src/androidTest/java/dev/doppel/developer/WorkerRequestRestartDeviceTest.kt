@@ -89,7 +89,7 @@ class WorkerRequestRestartDeviceTest {
         assertFalse(prefs.getBoolean("artemis_mode", false))
         assertTrue(prefs.getString("voice_pending_worker_run", "").isNullOrBlank())
         assertFalse(TaskSubmissionGate.creating.get())
-        val rows = File(context.noBackupFilesDir, "direct-runs-v1.json").takeIf(File::exists)?.readText()?.let(::JSONArray) ?: JSONArray()
+        val rows = File(context.noBackupFilesDir, "direct-runs-v1.json").takeIf(File::exists)?.readText()?.let { dev.doppel.sdk.SplitTaskEngine.readPersistedRuns(it) } ?: JSONArray()
         val terminal = setOf("completed", "failed", "cancelled")
         repeat(rows.length()) { assertTrue("Leave all unfinished tasks untouched", rows.getJSONObject(it).optString("status") in terminal) }
         val active = prefs.getString("active_run", "").orEmpty()
@@ -248,7 +248,7 @@ class WorkerRequestRestartDeviceTest {
             JSONObject(marker.contentDescription.toString().removePrefix("gesture-result:")).also { assertEquals(session, it.getString("session")) }
         } finally { all.forEach { it.recycle() } }
     }
-    private fun storedRun(id: String): JSONObject = JSONArray(File(context.noBackupFilesDir, "direct-runs-v1.json").readText()).let { rows ->
+    private fun storedRun(id: String): JSONObject = dev.doppel.sdk.SplitTaskEngine.readPersistedRuns(File(context.noBackupFilesDir, "direct-runs-v1.json").readText()).let { rows ->
         (0 until rows.length()).map(rows::getJSONObject).single { it.getString("id") == id }
     }
     private fun ledgerIds(): List<String> = context.openOrCreateDatabase("command_results.db", 0, null).use { db ->
@@ -352,7 +352,7 @@ class WorkerRequestRestartDeviceTest {
         val previousActive = preferences.getJSONObject("doppel").optJSONObject("active_run")?.optString("value").orEmpty()
         check(active.isBlank() || active == id || active == previousActive) { "Leave a newer active task untouched" }
         if (worker != null) {
-            val liveRows = JSONArray(File(context.noBackupFilesDir, "direct-runs-v1.json").readText())
+            val liveRows = dev.doppel.sdk.SplitTaskEngine.readPersistedRuns(File(context.noBackupFilesDir, "direct-runs-v1.json").readText())
             check(id.isNotBlank() && liveRows.length() == 1 && liveRows.getJSONObject(0).optString("id") == id &&
                 (active.isBlank() || active == id)) { "Do not stop a Worker not owned by this staged fixture" }
         }
@@ -428,7 +428,7 @@ class WorkerRequestRestartDeviceTest {
                     val envelope = if (recovering) JSONObject().put("decision", JSONObject().put("kind", "finish").put("status", "completed")
                         .put("message", "已重新观察，保持已完成的一次点击，不重复操作")).put("state", JSONObject.NULL)
                     else if (isA) JSONObject().put("decision", JSONObject().put("kind", "tap").put("target", "点击独立手势区域中心一次")
-                        .put("expected", "触摸计数增加一次").put("screen_context", "独立手势验证页面")).put("state", JSONObject.NULL)
+                        .put("expected", "触摸计数增加一次").put("screen_context", "独立手势验证页面").put("request_login_code", JSONObject.NULL)).put("state", JSONObject.NULL)
                     else JSONObject().put("result", JSONObject().put("status", "located").put("action", "tap")
                         .put("assessment", JSONObject().put("alignment", "consistent")).put("points", JSONArray().put(JSONArray(listOf(500, 500)))).put("duration_ms", 100))
                     val response = JSONObject().put("choices", JSONArray().put(JSONObject().put("finish_reason", "stop")

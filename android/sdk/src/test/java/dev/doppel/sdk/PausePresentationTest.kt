@@ -51,4 +51,32 @@ class PausePresentationTest {
         assertFalse(PausePresentation.from(run("a", "paused", "已暂停"))!!.userInitiated)
         assertNull(PausePresentation.from(run("a", "running", "正在执行")))
     }
+
+    @Test fun loginSetupEntryRequiresStructuredReasonAndSurvivesLocalReceiptRoundTrip() {
+        val pending = JSONObject().put("id", "request-a").put("kind", "input").put("manual_only", true)
+            .put("message", "请选择登录方式").put("reason", "login").put("package_name", "dev.fixture")
+        val stopped = run("a", "paused", "请选择登录方式").put("pending_request", pending)
+        val saved = JSONObject(PauseDetails.receipt(stopped).toString())
+        assertEquals(pending.toString(), saved.getJSONObject("pending_request").toString())
+        val merged = PauseDetails.merge(run("a", "paused", "已暂停"), saved, true)
+        assertEquals(pending.toString(), merged.getJSONObject("pending_request").toString())
+        assertTrue(PausePresentation.from(merged)!!.showLoginSettings)
+        assertTrue(merged.getJSONObject("pending_request").getBoolean("manual_only"))
+        assertFalse(PausePresentation.from(run("a", "paused", "请设置登录方式、账号密码或短信验证码"))!!.showLoginSettings)
+        for (reason in listOf("payment", "verification", "interruption", ""))
+            assertFalse(PausePresentation.from(run("a", "paused", "请登录").put("pending_request", JSONObject().put("reason", reason)))!!.showLoginSettings)
+        val newer = run("a", "paused", "已暂停").put("pending_request", JSONObject().put("id", "new-request").put("kind", "input"))
+        assertSame("Another request must not inherit an older login setting hint", newer, PauseDetails.merge(newer, saved, true))
+    }
+
+    @Test fun olderReasonOnlyReceiptCannotRemoveManualRequestIdentity() {
+        val current = run("a", "paused", "已暂停").put("pending_request", JSONObject().put("id", "current")
+            .put("kind", "input").put("manual_only", true))
+        val old = run("a", "paused", "请设置登录方式").put("pending_request", JSONObject().put("reason", "login"))
+        val merged = PauseDetails.merge(current, old, true)
+        assertEquals("current", merged.getJSONObject("pending_request").getString("id"))
+        assertTrue(merged.getJSONObject("pending_request").getBoolean("manual_only"))
+        assertTrue(PausePresentation.from(merged)!!.showLoginSettings)
+        assertFalse(current.getJSONObject("pending_request").has("reason"))
+    }
 }

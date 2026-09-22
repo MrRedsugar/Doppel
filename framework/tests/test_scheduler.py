@@ -40,10 +40,11 @@ def test_cron_dom_dow_or_and_invalid_input():
 
 
 @pytest.fixture
-def lab(tmp_path):
+def lab(tmp_path, monkeypatch):
     runtime = DoppelRuntime(RuntimeConfig(data_dir=tmp_path, auto_start=False))
     device = runtime.register_device("alice", "fixture", "Test device")
     clock = [ms("2026-09-08T00:00:00+00:00")]
+    monkeypatch.setattr("doppel.runtime.time.time",lambda:clock[0]/1000)
     scheduler = Scheduler(runtime, clock=lambda: clock[0], readiness=lambda owner, device: None)
     yield runtime, device, clock, scheduler
     runtime.store.db.close()
@@ -64,7 +65,7 @@ def test_once_dispatches_real_runtime_run_and_keeps_trace(lab):
     scheduler.tick()
     stored = scheduler.get("alice", job["id"])
     assert not stored["enabled"]
-    assert stored["history"][-1]["status"] == "started"
+    assert stored["history"][-1]["status"] == "queued"
     run_id = stored["history"][-1]["run_id"]
     run = runtime.get_run("alice", run_id)
     assert run.goal == job["goal"]
@@ -80,19 +81,19 @@ def test_once_dispatches_real_runtime_run_and_keeps_trace(lab):
     assert scheduler.get("alice", job["id"])["history"][-1]["status"] == "cancelled"
 
 
-def test_paused_task_is_never_preempted_then_missed_job_is_skipped(lab):
+def test_paused_task_keeps_scheduled_work_queued_past_grace_period(lab):
     runtime, device, clock, scheduler = lab
     existing = runtime.create_run("alice", device.id, "Existing user task", "ask")
     runtime.pause_run("alice", existing.id)
     job = create(lab)
     clock[0] += 1000
     scheduler.tick()
-    assert scheduler.get("alice", job["id"])["waiting_reason"] == "device_busy"
+    assert scheduler.get("alice", job["id"])["history"][-1]["status"] == "queued"
     clock[0] += 300001
     scheduler.tick()
-    assert scheduler.get("alice", job["id"])["history"][-1]["status"] == "missed"
+    assert scheduler.get("alice", job["id"])["history"][-1]["status"] == "queued"
     assert runtime.get_run("alice", existing.id).status == "paused"
-    assert len(runtime.runs("alice")) == 1
+    assert len(runtime.runs("alice")) == 2
 
 
 def test_disabled_deleted_and_foreign_jobs_cannot_dispatch(lab):
@@ -136,15 +137,11 @@ def test_uncertain_claim_after_restart_is_not_replayed(lab):
     assert runtime.runs("alice") == []
 
 
-def test_readiness_rechecked_and_failure_never_retries_occurrence(lab):
+def test_creation_failure_never_retries_occurrence(lab):
     runtime, _, clock, scheduler = lab
     job = create(lab)
     clock[0] += 1000
-    scheduler.readiness = lambda *_: "device_offline"
-    scheduler.tick()
-    assert scheduler.get("alice", job["id"])["waiting_reason"] == "device_offline"
-    scheduler.readiness = lambda *_: None
-    def fail(*_):
+    def fail(*_,**kwargs):
         raise RuntimeError("secret upstream detail")
     runtime.create_run = fail
     scheduler.tick()
@@ -179,7 +176,7 @@ def test_standalone_router_auth_crud_and_lifecycle(tmp_path):
     assert scheduler._loop_task is None
 
 
-def test_write_failure_after_creation_quarantines_same_live_process(lab):
+def test_write_failure_after_creation_reconciles_committed_submission(lab):
     runtime, _, clock, scheduler = lab
     job = create(lab, rule={"kind": "interval", "every_ms": 60000, "anchor_ms": clock[0] + 1000})
     save = scheduler._save
@@ -199,4 +196,9 @@ def test_write_failure_after_creation_quarantines_same_live_process(lab):
     clock[0] += 60000
     scheduler.tick()
     assert len(runtime.runs("alice")) == 1
-    assert not scheduler.get("alice", job["id"])["enabled"]
+    restored=scheduler.get("alice",job["id"])
+    assert restored["enabled"]
+    assert restored["history"][-1]["run_id"] == runtime.runs("alice")[0].id
+    scheduler.tick()
+    assert len(runtime.runs("alice")) == 2
+    assert scheduler.get("alice",job["id"])["history"][-2]["status"] == "cancelled"

@@ -35,13 +35,18 @@ class VaultAndBalanceDeviceTest {
     private val fixturePackage = "dev.doppel.fixture.login"
 
     @Test fun passwordManagementCreatesEditsLocksReopensAndDeletesOnlyItsOwnFixture() {
-        preflight()
+        assertEquals("Password UI regression may only use its disposable APK", "dev.doppel.loginqa", context.packageName)
+        assertNull("Never interrupt a task for login settings", DeviceWorkerService.instance)
+        assertTrue(context.getSharedPreferences("doppel", 0).getString("active_run", "").isNullOrBlank())
+        assertFalse(context.getSystemService(KeyguardManager::class.java).isDeviceLocked)
+        assertFalse(LoginAssist.sensitiveSessionActive())
         val vaultPrefs = context.getSharedPreferences("doppel_credential_vault", 0)
+        val loginPrefs = context.getSharedPreferences("doppel_login", 0)
         val vaultFile = File(context.noBackupFilesDir, "credential-vault-v1.bin")
         val temporaryFile = File(vaultFile.path + ".tmp")
-        val aliases = listOf("${context.packageName}.credential.v1", "${context.packageName}.credential.pin.v1")
+        val aliases = listOf("${context.packageName}.credential.v1", "${context.packageName}.credential.pin.v1", "${context.packageName}.login.v1")
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        val pristine = vaultPrefs.all.isEmpty() && !vaultFile.exists() && !temporaryFile.exists() && aliases.none(store::containsAlias)
+        val pristine = vaultPrefs.all.isEmpty() && loginPrefs.all.isEmpty() && !vaultFile.exists() && !temporaryFile.exists() && aliases.none(store::containsAlias)
         if (!pristine) {
             report("vault", false, true, "Not run: an existing vault, PIN, ciphertext or key must be preserved")
             fail("Cannot run the vault UI fixture on an existing vault; preserve the user's PIN, entries and keys")
@@ -50,7 +55,7 @@ class VaultAndBalanceDeviceTest {
         var activity: Activity? = null
         var passed = false
         try {
-            activity = launch(PasswordSettingsActivity::class.java)
+            activity = launch(LoginSettingsActivity::class.java)
             expectText("设置 4 位 PIN")
             fill("4 位数字 PIN", pin)
             fill("再次输入 PIN", pin)
@@ -59,87 +64,97 @@ class VaultAndBalanceDeviceTest {
             assertTrue("The real UI must persist a PIN", CredentialVault(context).hasPin())
             capture("vault-01-created", activity)
 
-            click("添加登录资料")
+            click("添加应用")
+            click("选择应用", description = true)
+            click("手动填写包名")
             fill("应用包名", fixturePackage)
-            fill("名称，例如 京东", fixtureLabel)
+            click("登录方式", description = true)
+            click("账号密码")
+            fill("资料名称，例如 常用账号", fixtureLabel)
             fill("账号或手机号", "fixture-user")
             fill("密码", "fixture-only-password-one")
             click("保存")
-            expectText(fixtureLabel)
+            expectText("账号密码 · $fixtureLabel · 编辑")
             assertFixture(fixtureLabel, "fixture-user", "fixture-only-password-one")
             assertFalse("Stored credentials must not be plaintext", vaultFile.readBytes().toString(Charsets.ISO_8859_1).contains("fixture-only-password-one"))
 
-            click(fixtureLabel)
-            expectText("编辑登录资料")
-            fill("名称，例如 京东", editedLabel)
+            click(fixturePackage)
+            expectText("编辑登录设置")
+            fill("资料名称，例如 常用账号", editedLabel)
             fill("账号或手机号", "fixture-edited-user")
             fill("密码", "fixture-only-password-two")
             click("保存")
-            expectText(editedLabel)
+            expectText("账号密码 · $editedLabel · 编辑")
             assertFixture(editedLabel, "fixture-edited-user", "fixture-only-password-two")
             capture("vault-02-edited", activity)
 
-            click(editedLabel)
-            expectText("编辑登录资料")
+            click(fixturePackage)
+            expectText("编辑登录设置")
             val current = requireNotNull(activity)
-            val dialogField = PasswordSettingsActivity::class.java.getDeclaredField("activeDialog").apply { isAccessible = true }
+            val dialogField = LoginSettingsActivity::class.java.getDeclaredField("activeDialog").apply { isAccessible = true }
             val dialog = ui { dialogField.get(current) as android.app.Dialog }
             fun views(view: android.view.View): List<android.view.View> = listOf(view) +
                 if (view is android.view.ViewGroup) (0 until view.childCount).flatMap { views(view.getChildAt(it)) } else emptyList()
             val editorInputs = ui { views(requireNotNull(dialog.window).decorView).filterIsInstance<android.widget.EditText>() }
             assertTrue(editorInputs.isNotEmpty())
+            assertTrue("The editor must not duplicate the application-list switch", ui {
+                views(requireNotNull(dialog.window).decorView).none { it is android.widget.CompoundButton }
+            })
             inst.sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_HOME)
             await("Leaving password management must dismiss its editor and erase editable values") {
                 ui { dialogField.get(current) == null && !dialog.isShowing && editorInputs.all { it.text.isEmpty() } }
             }
-            context.startActivity(Intent(context, PasswordSettingsActivity::class.java)
+            context.startActivity(Intent(context, LoginSettingsActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
-            expectText("解锁密码管理")
-            assertFalse("An old editor cannot survive over the PIN screen", hasText("编辑登录资料") || hasText(editedLabel))
-            fill("4 位数字 PIN", pin); click("解锁"); expectText(editedLabel)
+            expectText("解锁登录设置")
+            assertFalse("An old editor cannot survive over the PIN screen", hasText("编辑登录设置") || hasText("账号密码 · $editedLabel · 编辑"))
+            fill("4 位数字 PIN", pin); click("解锁"); expectText("账号密码 · $editedLabel · 编辑")
 
             click("锁定")
-            expectText("解锁密码管理")
+            expectText("解锁登录设置")
             fill("4 位数字 PIN", "0000")
             click("解锁")
             await("A wrong PIN must be rejected") { vaultPrefs.getInt("pin_failures", 0) == 1 }
-            expectText("解锁密码管理")
-            assertFalse("Credentials must stay hidden after a wrong PIN", hasText(editedLabel))
+            expectText("解锁登录设置")
+            assertFalse("Credentials must stay hidden after a wrong PIN", hasText("账号密码 · $editedLabel · 编辑"))
             val retryAt = vaultPrefs.getLong("pin_next", 0)
             assertTrue("Wrong PIN must impose its real cooldown", retryAt > SystemClock.elapsedRealtime())
             fill("4 位数字 PIN", pin)
             click("解锁")
-            expectText("解锁密码管理")
+            expectText("解锁登录设置")
             assertEquals("A cooldown rejection must not add another wrong attempt", 1, vaultPrefs.getInt("pin_failures", 0))
             capture("vault-03-wrong-pin-rejected", activity)
             // Wait for the production 30-second first-attempt cooldown; never bypass or rewrite it.
             await("The first PIN cooldown must expire normally", 35_000) { SystemClock.elapsedRealtime() >= retryAt }
             click("解锁")
             expectText("已解锁")
-            expectText(editedLabel)
+            expectText("账号密码 · $editedLabel · 编辑")
             assertEquals(0, vaultPrefs.getInt("pin_failures", -1))
 
             finish(activity)
-            activity = launch(PasswordSettingsActivity::class.java)
-            expectText("解锁密码管理")
-            assertFalse("Reopening must require PIN before displaying saved entries", hasText(editedLabel))
+            activity = launch(LoginSettingsActivity::class.java)
+            expectText("解锁登录设置")
+            assertFalse("Reopening must require PIN before displaying saved entries", hasText("账号密码 · $editedLabel · 编辑"))
             fill("4 位数字 PIN", pin)
             click("解锁")
-            expectText(editedLabel)
-            click(editedLabel)
-            expectField("应用包名", fixturePackage)
-            expectField("名称，例如 京东", editedLabel)
+            expectText("账号密码 · $editedLabel · 编辑")
+            click(fixturePackage)
+            expectText(fixturePackage)
+            expectField("资料名称，例如 常用账号", editedLabel)
             expectField("账号或手机号", "fixture-edited-user")
             click("取消")
             assertFixture(editedLabel, "fixture-edited-user", "fixture-only-password-two")
             capture("vault-04-reopened", activity)
-            click(editedLabel)
+            click(fixturePackage)
+            click("删除")
+            expectText("删除 $fixturePackage 的登录资料？")
             click("删除")
             expectText("已解锁")
-            assertFalse("The deleted entry must disappear from the real UI", hasText(editedLabel))
+            assertFalse("The deleted entry must disappear from the real UI", hasText("账号密码 · $editedLabel · 编辑"))
             val reader = CredentialVault(context)
             assertTrue(reader.unlock(pin))
             assertTrue("Delete must persist an empty vault", reader.entries().isEmpty())
+            assertTrue("Delete must also remove its unified login profile", LoginAssist(context).profiles().isEmpty())
             reader.lock()
             capture("vault-05-deleted", activity)
             passed = true
@@ -148,10 +163,14 @@ class VaultAndBalanceDeviceTest {
             // The precondition proves these exact files, preferences and aliases belong to this test only.
             assertTrue(vaultPrefs.edit().clear().commit())
             context.deleteSharedPreferences("doppel_credential_vault")
+            assertTrue(loginPrefs.edit().clear().commit())
+            context.deleteSharedPreferences("doppel_login")
+            LoginAssist.clearSession()
             listOf(vaultFile, temporaryFile).forEach { if (it.exists()) assertTrue("Remove only test vault files", it.delete()) }
             aliases.forEach { if (store.containsAlias(it)) store.deleteEntry(it) }
             val restored = before == protectedState(excludeVault = true) &&
                 context.getSharedPreferences("doppel_credential_vault", 0).all.isEmpty() &&
+                context.getSharedPreferences("doppel_login", 0).all.isEmpty() &&
                 !vaultFile.exists() && !temporaryFile.exists() && aliases.none(store::containsAlias)
             report("vault", passed && restored, restored, "Real UI; naturally elapsed first wrong-PIN cooldown; secure windows retained")
             assertTrue("Remove only the fixture; preserve all other configuration, encrypted files and task history", restored)
@@ -235,7 +254,7 @@ class VaultAndBalanceDeviceTest {
         assertNull("Stop the worker before settings tests; retain paused tasks", DeviceWorkerService.instance)
         assertFalse("Unlock the emulator first", context.getSystemService(KeyguardManager::class.java).isDeviceLocked)
         val file = File(context.noBackupFilesDir, "direct-runs-v1.json")
-        val runs = if (file.exists()) JSONArray(file.readText()) else JSONArray()
+        val runs = if (file.exists()) dev.doppel.sdk.SplitTaskEngine.readPersistedRuns(file.readText()) else JSONArray()
         repeat(runs.length()) { assertTrue("Do not modify settings while a task executes", runs.getJSONObject(it).optString("status") in setOf("paused", "completed", "failed", "cancelled")) }
     }
 
@@ -306,7 +325,14 @@ class VaultAndBalanceDeviceTest {
             val entry = reader.entries().single()
             assertEquals(fixturePackage, entry.packageName); assertEquals(label, entry.label)
             assertEquals(username, entry.username); assertEquals(password, entry.password)
-            assertTrue("The explicit new-entry task-filling switch must remain saved after edit", entry.allowTasks)
+            assertTrue("The chosen account must be authorized for local task filling", entry.allowTasks)
+            val profile = LoginAssist(context).profiles().single()
+            assertEquals(fixturePackage, profile.packageName)
+            assertEquals("password", profile.method)
+            assertEquals(entry.id, profile.credentialId)
+            assertTrue("New unified profiles default on and preserve their switch after edits", profile.enabled)
+            val toggle = waitNode("The list must expose its login switch") { it.contentDescription?.toString() == "$fixturePackage 登录辅助" }
+            try { assertTrue(toggle.isCheckable && toggle.isChecked) } finally { toggle.recycle() }
         } finally { reader.lock() }
     }
     private fun <T> ui(work: () -> T): T { var result: Result<T>? = null; inst.runOnMainSync { result = runCatching(work) }; return result!!.getOrThrow() }

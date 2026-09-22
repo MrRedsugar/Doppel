@@ -12,11 +12,18 @@ class DeviceWorkerService : Service(), DeviceWorker {
         @Volatile var state = "未连接"
         const val PAUSE = "dev.doppel.PAUSE"
         internal const val SUBMIT_VOICE = "dev.doppel.SUBMIT_VOICE"
+        internal const val WAKE_QUEUE = "dev.doppel.WAKE_QUEUE"
+        internal fun hasActiveExecution(activeRun: String, paused: Boolean, starting: Boolean): Boolean =
+            starting || (!paused && activeRun.isNotBlank())
     }
     @Volatile private var alive = true
     @Volatile private var paused = true
     @Volatile private var submittingVoice = false
     val isPaused: Boolean get() = paused
+    /** The worker keeps polling when idle; an unpaused service alone does not own the device. */
+    internal val hasActiveExecution: Boolean get() = alive && ::gateway.isInitialized &&
+        hasActiveExecution(gateway.prefs.getString("active_run", "").orEmpty(), paused,
+            ::taskQueue.isInitialized && taskQueue.isStarting)
     internal fun allowsCredentialInput(runId: String): Boolean = runId.isNotBlank() && alive && !paused &&
         ::gateway.isInitialized && gateway.prefs.getString("active_run", "") == runId &&
         lastRun?.optString("id") == runId && lastRun?.optString("status") == "running"
@@ -47,10 +54,44 @@ class DeviceWorkerService : Service(), DeviceWorker {
     private val submissionExecutor = Executors.newSingleThreadExecutor()
     private lateinit var gateway: Gateway
     private lateinit var completion: TaskCompletionDelivery
+    private lateinit var taskQueue: TaskQueueDispatcher
     @Volatile private var overlay: CompanionOverlay? = null
     private var overlayDensity = 0
     @Volatile var companionRevision = 0L; private set
     @Volatile private var lastRun: JSONObject? = null
+    private val companionRun = WorkerCompanionState()
+    internal fun observeCompanionRun(scope: String, run: JSONObject) {
+        if (!alive || !::gateway.isInitialized || gateway.isDirectMode() || gateway.reviewScope() != scope ||
+            gateway.prefs.getString("active_run", "") != run.optString("id")) return
+        companionRun.update(scope, run)
+    }
+    internal fun companionGatewayState(scope: String): JSONObject? {
+        if (!::gateway.isInitialized || gateway.isDirectMode() || gateway.reviewScope() != scope) return null
+        return companionRun.read(scope, gateway.prefs.getString("active_run", "").orEmpty(), alive, paused)
+    }
+    /** Commit on the same main-thread boundary as service restart and phone resume callbacks. */
+    internal fun pauseForLanHandoff(runId: String, scope: String, ticket: Long): Long? {
+        val commit = java.util.concurrent.FutureTask<Long?> {
+            synchronized(gateway.prefs) {
+                val run = companionGatewayState(scope)
+                if (instance !== this || !alive || !TaskControl.isCurrent(ticket) ||
+                    run?.optString("id") != runId || run.optString("status") !in setOf("paused", "awaiting_input", "awaiting_approval")) null
+                else TaskControl.invalidateIfCurrent(ticket)?.also { suspendLocally() }
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) commit.run() else handler.post(commit)
+        return try { commit.get(3, java.util.concurrent.TimeUnit.SECONDS) }
+        catch (_: Exception) { commit.cancel(false); null }
+    }
+    internal fun dismissPauseForLanHandoff(isCurrent: () -> Boolean): Boolean {
+        val commit = java.util.concurrent.FutureTask {
+            if (instance !== this || !alive || !isCurrent()) false
+            else { completion.dismiss(); true }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) commit.run() else handler.post(commit)
+        return try { commit.get(3, java.util.concurrent.TimeUnit.SECONDS) }
+        catch (_: Exception) { commit.cancel(false); false }
+    }
     private val handler = Handler(Looper.getMainLooper())
     override fun onBind(intent: Intent?) = null
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
@@ -63,7 +104,7 @@ class DeviceWorkerService : Service(), DeviceWorker {
     private fun createCompanion() {
         if (!alive || PaymentConsent.settingsVisible || overlay != null) return
         overlayDensity = resources.configuration.densityDpi
-        overlay = CompanionOverlay(this) { pause() }.also {
+        overlay = CompanionOverlay(this) { pauseActiveRun() }.also {
             it.setEditorVisible(VoiceActivity.keyboardVisible)
             it.show()
         }
@@ -95,6 +136,7 @@ class DeviceWorkerService : Service(), DeviceWorker {
     }
     override fun onCreate() {
         super.onCreate(); instance = this; gateway = Gateway(this); completion = TaskCompletionDelivery(this)
+        taskQueue = TaskQueueDispatcher(this, { alive }, ::acceptQueueHead) { if (state != it) update(it) }
         getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel("device", "任务执行", NotificationManager.IMPORTANCE_LOW))
         startForeground(21, notification("已暂停"))
         if (!FirstUseConsent.isAccepted(this) || !ReleaseIntegrity.isTrusted(this)) { stopSelf(); return }
@@ -112,7 +154,7 @@ class DeviceWorkerService : Service(), DeviceWorker {
         return Notification.Builder(this, "device").setContentTitle(if (labelled.isNullOrBlank()) "Doppel" else "Doppel · $labelled")
             .setContentText(pauseInfo?.surfaceReason?.take(160) ?: message.takeUnless { it == "已暂停" } ?: "等待任务")
             .setVisibility(Notification.VISIBILITY_PRIVATE)
-            .setSmallIcon(if (pauseInfo != null) UiIcons.pause else R.drawable.doppel_ic_layers_2).setOngoing(true)
+            .setSmallIcon(if (pauseInfo != null) UiIcons.pause else R.drawable.doppel_ic_layers_2).setOngoing(true).setOnlyAlertOnce(true)
             .setContentIntent(PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
             .addAction(Notification.Action.Builder(null, "暂停", PendingIntent.getService(this, 1, Intent(this, DeviceWorkerService::class.java).setAction(PAUSE), PendingIntent.FLAG_IMMUTABLE)).build()).build()
     }
@@ -135,6 +177,7 @@ class DeviceWorkerService : Service(), DeviceWorker {
         }
         if (intent?.action == PAUSE) pause()
         else if (intent?.action == SUBMIT_VOICE) submitVoice(intent)
+        else if (intent?.action == WAKE_QUEUE) Unit // Polling may adopt a queue head, but must never resume a paused owner.
         else if (intent?.hasExtra(TaskControl.EXTRA_GENERATION) != true || TaskControl.isCurrent(intent.getLongExtra(TaskControl.EXTRA_GENERATION, 0))) resume()
         return START_NOT_STICKY
     }
@@ -155,22 +198,21 @@ class DeviceWorkerService : Service(), DeviceWorker {
             TaskSubmissionGate.creating.set(false); return
         }
         submittingVoice = true
-        suspendLocally(); update("正在创建任务")
+        if (gateway.prefs.getString("active_run", "").isNullOrBlank()) update("正在创建任务")
         submissionExecutor.execute {
             try {
                 check(alive && TaskControl.isCurrent(ticket))
-                check(gateway.prefs.getString("active_run", "").isNullOrBlank())
-                val device = gateway.prefs.getString("device_id", "").orEmpty()
+                val connection = gateway.captureReviewConnection()
+                val device = connection.deviceId
                 check(device.isNotBlank())
                 val mode = listOf("ask", "assist", "full")[gateway.prefs.getInt("mode_index", 1).coerceIn(0, 2)]
-                val run = gateway.createConversationRun(JSONObject().put("device_id", device).put("goal", goal).put("mode", mode))
-                TaskControl.reconcileCreatedRun(this, run, ticket) { reconciled, error ->
+                val run = gateway.createConversationRun(JSONObject().put("device_id", device).put("goal", goal).put("mode", mode), connection)
+                TaskControl.reconcileCreatedRun(this, run, ticket, connection) { reconciled, error ->
                     submittingVoice = false
                     TaskSubmissionGate.creating.set(false)
                     if (alive) {
-                        if (reconciled != null) lastRun = reconciled
-                        if (error == null && TaskControl.isCurrent(ticket)) resume()
-                        else { suspendLocally(); if (error != null) update(error) }
+                        if (gateway.prefs.getString("active_run", "").isNullOrBlank())
+                            update(error ?: if (reconciled?.optString("status") == "queued") "任务已加入队列" else "等待任务")
                     }
                 }
             } catch (_: Exception) {
@@ -181,23 +223,36 @@ class DeviceWorkerService : Service(), DeviceWorker {
             }
         }
     }
-    override fun pause() {
+    override fun pause() = pause(pauseQueueWhenIdle = true)
+    /** Opening an input surface or touching the phone must not disable an idle queue. */
+    internal fun pauseActiveRun() = pause(pauseQueueWhenIdle = false)
+    private fun pause(pauseQueueWhenIdle: Boolean) {
+        val runId = gateway.prefs.getString("active_run", "").orEmpty()
+        if (runId.isEmpty() && !pauseQueueWhenIdle) {
+            // A head may be starting before its local owner is published. Revoke that
+            // admission, leaving its existing compensation to settle the run state.
+            if (taskQueue.isStarting) TaskControl.invalidate()
+            return
+        }
         if (paused && lastRun?.optString("status") == "paused") return
         suspendLocally()
-        val runId = gateway.prefs.getString("active_run", "").orEmpty()
         if (runId.isNotEmpty()) TaskControl.request(this, runId, "pause") { run, _ ->
             if (run != null && run.optString("status") == "paused" && gateway.prefs.getString("active_run", "") == runId)
                 showPausedRun(PauseDetails.resolve(this, run, true))
         }
-        else TaskControl.invalidate()
+        else {
+            gateway.prefs.edit().putBoolean("queue_dispatch_paused", true).apply()
+            TaskControl.invalidate(); update("队列已暂停")
+        }
     }
     fun suspendLocally() = suspendLocallyPreservingPauseNotice(false)
+    internal fun dismissPauseNotice() { if (::completion.isInitialized) completion.dismiss() }
     internal fun suspendLocallyPreservingPauseNotice(preservePauseNotice: Boolean) {
         val wasPaused = paused
         paused = true
+        DoppelAccessibilityService.instance?.stopActionFeedback()
         val saved = runCatching { DirectRuntime.interrupt(this, "你已暂停任务，继续时将重新观察屏幕") }.isSuccess
         DoppelAccessibilityService.instance?.setTouchGuard(false)
-        DoppelAccessibilityService.instance?.stopActionFeedback()
         LoginAssist.clearSession()
         // A repeat pause is an acknowledgement, not dismissal of its queued/visible explanation.
         if (::completion.isInitialized && !(wasPaused && preservePauseNotice)) completion.dismiss()
@@ -216,16 +271,25 @@ class DeviceWorkerService : Service(), DeviceWorker {
         suspendLocallyPreservingPauseNotice(true)
         PauseDetails.remember(this, run)
         update("已暂停")
+        // Local native takeover stops polling, so publish its existing bound receipt here.
+        companionRun.scopeFor(id)?.let { scope ->
+            if (!gateway.isDirectMode() && gateway.reviewScope() == scope && gateway.prefs.getString("active_run", "") == id) {
+                observeCompanionRun(scope, run)
+                runCatching { GatewayTaskEvents.observe(this, scope, run) }
+                    .onFailure { android.util.Log.w("DoppelCompanion", "gateway_event_save_failed") }
+            }
+        }
         completion.deliverPauseIf(run) { alive && paused && gateway.prefs.getString("active_run", "") == id }
     }
-    private fun stopWithReason(reason: String, takeover: String = "") {
+    internal fun stopWithReason(reason: String, takeover: String = "", preservePrevious: Boolean = true) {
         val id = gateway.prefs.getString("active_run", "").orEmpty()
         val previous = lastRun?.takeIf { it.optString("id") == id }
-        val run = if (previous?.optString("status") == "paused" && !PausePresentation.generic(previous.optString("message"))) JSONObject(previous.toString())
+        val run = if (preservePrevious && previous?.optString("status") == "paused" && !PausePresentation.generic(previous.optString("message"))) JSONObject(previous.toString())
             else JSONObject(previous?.toString() ?: "{}").put("id", id).put("status", "paused").put("message", reason)
                 .put("updated_at", System.currentTimeMillis())
         if (previous?.optString("status") != "paused" && takeover in setOf("verification", "payment", "login", "interruption"))
-            run.put("pending_request", JSONObject().put("reason", takeover))
+            run.put("pending_request", JSONObject().put("reason", takeover).put("kind", "input")
+                .put("manual_only", true).put("id", "native:$takeover").put("message", reason))
         runCatching { DirectRuntime.interrupt(this, run.optString("message")) }
         if (id.isNotBlank()) showPausedRun(run) else { suspendLocally(); update(reason) }
     }
@@ -241,6 +305,7 @@ class DeviceWorkerService : Service(), DeviceWorker {
         if (PaymentConsent.settingsVisible) { suspendLocally(); paymentSettingsVisibilityChanged(); return }
         completion.clearPause(gateway.prefs.getString("active_run", "").orEmpty())
         PauseDetails.clear(this)
+        gateway.prefs.edit().putBoolean("queue_dispatch_paused", false).apply()
         paused = false; update("等待任务")
     }
     override fun cancel() { TaskControl.invalidate(); suspendLocally(); update("已停止") }
@@ -254,11 +319,62 @@ class DeviceWorkerService : Service(), DeviceWorker {
     }
     internal fun acceptEndedRun(run: JSONObject) {
         val id = run.optString("id")
-        if (!alive || id.isBlank() || gateway.prefs.getString("active_run", "") != id || !TaskPresentation.terminal(run.optString("status"))) return
-        lastRun = run
-        gateway.prefs.edit().remove("active_run").remove("voice_pending_worker_run").remove("voice_pending_worker_generation").apply()
+        synchronized(gateway.prefs) {
+            val active = gateway.prefs.getString("active_run", "").orEmpty()
+            if (!alive || id.isBlank() || (active != id && !(active.isBlank() && lastRun?.optString("id") == id)) || !TaskPresentation.terminal(run.optString("status"))) return
+            lastRun = run
+            val edit = gateway.prefs.edit().remove("active_run")
+            if (gateway.prefs.getString("voice_pending_worker_run", "") == id)
+                edit.remove("voice_pending_worker_run").remove("voice_pending_worker_generation")
+            check(edit.commit()) { "任务结束状态未保存" }
+        }
         PauseDetails.clear(this, id); completion.clearPause(id)
         update("等待任务")
+    }
+    private fun acceptQueueHead(run: JSONObject, valid: () -> Boolean): Boolean {
+        val commit = java.util.concurrent.FutureTask {
+            if (!valid()) false else { acceptQueueHeadOnMain(run, valid); true }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) commit.run() else handler.post(commit)
+        return try { commit.get(3, java.util.concurrent.TimeUnit.SECONDS) }
+        catch (_: Exception) { commit.cancel(false); false }
+    }
+    private fun acceptQueueHeadOnMain(run: JSONObject, valid: () -> Boolean) {
+        val id = run.getString("id")
+        check(alive && run.optString("status") !in setOf("queued", "completed", "failed", "cancelled"))
+        synchronized(gateway.prefs) {
+            check(valid()) { "任务启动条件已变化" }
+            val active = gateway.prefs.getString("active_run", "").orEmpty()
+            check(active.isBlank() || active == id) { "已有其他任务取得执行资格" }
+            check(gateway.prefs.edit().putString("active_run", id).commit()) { "执行任务引用未保存" }
+        }
+        lastRun = run
+        if (run.optString("status") == "paused") {
+            paused = true
+            showPausedRun(PauseDetails.resolve(this, run, true))
+        }
+        else { paused = false; update(if (run.optString("status") == "running") "等待任务" else TaskPresentation.title(run.optString("status"))) }
+    }
+    /** A paused worker still observes termination by another client; observing is never resuming. */
+    private fun reconcilePausedOwner(connection: Gateway.ReviewConnection) {
+        val id = gateway.prefs.getString("active_run", "").orEmpty()
+        if (id.isBlank()) return
+        val ticket = TaskControl.currentGeneration()
+        fun current() = alive && paused && TaskControl.isCurrent(ticket) && connection.scope == gateway.reviewScope() &&
+            gateway.prefs.getString("active_run", "") == id
+        val run = connection.request("GET", "/runs/$id")
+        if (!current() || run.optString("id") != id) return
+        if (run.optString("status") != "running" && gateway.prefs.getString("queue_start_pending_${connection.scope}", "") == id)
+            check(gateway.prefs.edit().remove("queue_start_pending_${connection.scope}").commit())
+        if (TaskPresentation.terminal(run.optString("status"))) {
+            if (DoppelAccessibilityService.instance?.awaitExecutionStopped(setOf(id)) == false || !current()) return
+            acceptEndedRun(run)
+            completion.deliverIf(run) { alive && connection.scope == gateway.reviewScope() }
+            AutomaticUnlockSession.taskState(id, run.optString("status"))
+        } else if (lastRun?.optString("id") != id) {
+            lastRun = run
+            if (run.optString("status") == "paused") handler.post { if (current()) showPausedRun(PauseDetails.resolve(this, run, true)) }
+        }
     }
     private fun loop() {
         val results = try { ResultStore(this) } catch (error: Exception) {
@@ -267,15 +383,17 @@ class DeviceWorkerService : Service(), DeviceWorker {
         }
         val ledger = results.ledger
         var cleanupAt = 0L
+        var pausedCheckedAt = 0L
         while (alive) {
             runCatching { ScheduleManager.get(this).tick() }
                 .onFailure { logLoopFailure(WorkerLoopDiagnostic.Stage.SCHEDULE_TICK, it) }
-            val device = gateway.prefs.getString("device_id", "").orEmpty()
+            val connection = gateway.captureReviewConnection()
+            val device = connection.deviceId
             if (device.isNotEmpty() && System.currentTimeMillis() - cleanupAt > 30000) {
                 cleanupAt = System.currentTimeMillis()
                 var cleanupStage = WorkerLoopDiagnostic.Stage.CLEANUP_POLL
                 try {
-                    val cleanups = gateway.request("GET", "/devices/$device/data-cleanup").optJSONArray("items")
+                    val cleanups = connection.request("GET", "/devices/$device/data-cleanup").optJSONArray("items")
                     if (cleanups != null) for (i in 0 until cleanups.length()) {
                         cleanupStage = WorkerLoopDiagnostic.Stage.CLEANUP_LOCAL
                         val item = cleanups.getJSONObject(i); val ids = item.optJSONArray("command_ids")
@@ -283,40 +401,62 @@ class DeviceWorkerService : Service(), DeviceWorker {
                         DoppelAccessibilityService.instance?.clearObservationHistory()
                         gateway.clearDocumentCache()
                         cleanupStage = WorkerLoopDiagnostic.Stage.CLEANUP_ACK
-                        gateway.request("POST", "/devices/$device/data-cleanup/${item.getString("id")}/ack", JSONObject())
+                        connection.request("POST", "/devices/$device/data-cleanup/${item.getString("id")}/ack", JSONObject())
                     }
                 } catch (error: Exception) {
                     logLoopFailure(cleanupStage, error)
                     // Deletion stays in the server outbox until a confirmed local purge.
                 }
             }
-            if (paused) { Thread.sleep(300); continue }
+            if (gateway.prefs.getString("active_run", "").isNullOrBlank()) {
+                try { taskQueue.poll(connection) }
+                catch (error: Exception) { logLoopFailure(WorkerLoopDiagnostic.Stage.QUEUE_POLL, error); update("队列状态暂不可用，等待重试") }
+                if (gateway.prefs.getString("active_run", "").isNullOrBlank()) { Thread.sleep(300); continue }
+            }
+            if (paused) {
+                if (SystemClock.elapsedRealtime() - pausedCheckedAt >= 1000) {
+                    pausedCheckedAt = SystemClock.elapsedRealtime()
+                    try { reconcilePausedOwner(connection) }
+                    catch (error: Exception) { logLoopFailure(WorkerLoopDiagnostic.Stage.ACTIVE_RUN_POLL, error) }
+                }
+                Thread.sleep(300); continue
+            }
             var stage = WorkerLoopDiagnostic.Stage.CONTROL_STATE
             var directMode: Boolean? = null
             try {
                 val generation = TaskControl.currentGeneration()
                 if (!AutomaticUnlockSession.awaitHandoff { alive && !paused && TaskControl.isCurrent(generation) }) continue
-                directMode = gateway.isDirectMode()
+                directMode = connection.direct
+                val pollConnection = AutomaticTaskNotice.connectionStamp(this)
+                fun sameConnection() = alive && TaskControl.isCurrent(generation) &&
+                    connection.scope == gateway.reviewScope() && AutomaticTaskNotice.connectionStamp(this) == pollConnection
+                if (!sameConnection()) continue
                 if (device.isEmpty()) { paused = true; update("请先绑定设备"); continue }
                 val activeRun = gateway.prefs.getString("active_run", "").orEmpty()
                 if (activeRun.isNotBlank()) {
                     stage = WorkerLoopDiagnostic.Stage.ACTIVE_RUN_POLL
-                    val active = gateway.request("GET", "/runs/$activeRun")
+                    val active = connection.request("GET", "/runs/$activeRun")
                     stage = WorkerLoopDiagnostic.Stage.ACTIVE_RUN_STATE
-                    fun currentPoll() = alive && !paused && TaskControl.isCurrent(generation) && gateway.prefs.getString("active_run", "") == activeRun
+                    fun currentPoll() = sameConnection() && !paused && gateway.prefs.getString("active_run", "") == activeRun
                     if (!currentPoll() || active.optString("id") != activeRun) continue
                     lastRun = active
+                    if (!connection.direct) {
+                        observeCompanionRun(connection.scope, active)
+                        runCatching { GatewayTaskEvents.observe(this, connection.scope, active) }
+                            .onFailure { android.util.Log.w("DoppelCompanion", "gateway_event_save_failed") }
+                    }
                     AutomaticUnlockSession.updateProgress(active, paused)
                     if (WorkerLoopDiagnostic.isRecovering(state)) update("等待任务")
                     stage = WorkerLoopDiagnostic.Stage.ACTIVE_OVERLAY
                     overlay?.display(active, state)
                     val running = active.optString("status") == "running"
+                    val startConfirmed = !taskQueue.isStarting && gateway.prefs.getString("queue_start_pending_${connection.scope}", "") != activeRun
                     val service = DoppelAccessibilityService.instance
                     stage = WorkerLoopDiagnostic.Stage.ACTIVE_FEEDBACK
                     if (!running) service?.stopActionFeedback()
                     val outsideClient = try { service?.foregroundPackage() != packageName } catch (_: Exception) { false }
                     stage = WorkerLoopDiagnostic.Stage.ACTIVE_TOUCH_GUARD
-                    service?.setTouchGuard(running && outsideClient && gateway.prefs.getBoolean("touch_pause", true), ::currentPoll)
+                    service?.setTouchGuard(running && startConfirmed && outsideClient && gateway.prefs.getBoolean("touch_pause", true), ::currentPoll)
                     stage = WorkerLoopDiagnostic.Stage.ACTIVE_PAUSE
                     if (active.optString("status") == "paused") {
                         showPausedRun(PauseDetails.resolve(this, active, true))
@@ -331,11 +471,18 @@ class DeviceWorkerService : Service(), DeviceWorker {
                         if (!cleared) continue
                         service?.setTouchGuard(false)
                         LoginAssist.clearSession()
-                        completion.deliverIf(active) { alive && !paused && TaskControl.isCurrent(generation) && gateway.prefs.getString("active_run", "").isNullOrBlank() }
+                        completion.deliverIf(active) { alive && connection.scope == gateway.reviewScope() }
                         update("等待任务")
                         // Relocking invalidates this poll; publish completion and clear ownership first.
                         AutomaticUnlockSession.taskState(activeRun, active.optString("status"))
+                        continue
                     }
+                }
+                if (taskQueue.isStarting) { Thread.sleep(200); continue }
+                if (gateway.prefs.getString("queue_start_pending_${connection.scope}", "") == activeRun) {
+                    if (sameConnection() && lastRun?.optString("status") == "running")
+                        connection.request("POST", "/runs/$activeRun/pause", JSONObject())
+                    Thread.sleep(200); continue
                 }
                 if (!AutomaticUnlockSession.awaitHandoff { alive && !paused && TaskControl.isCurrent(generation) }) continue
                 stage = WorkerLoopDiagnostic.Stage.COMMAND_POLL
@@ -344,7 +491,8 @@ class DeviceWorkerService : Service(), DeviceWorker {
                 // execution state published immediately before dispatching a command.
                 if (gateway.prefs.getString("active_run", "").orEmpty().isNotBlank() &&
                     lastRun?.optString("status") == "running") update("正在思考")
-                val polled = gateway.request("GET", "/devices/$device/commands?timeout=1")
+                val polled = connection.request("GET", "/devices/$device/commands?timeout=1")
+                if (!sameConnection()) continue
                 stage = WorkerLoopDiagnostic.Stage.COMMAND_STATE
                 if (WorkerLoopDiagnostic.isRecovering(state)) update("等待任务")
                 val command = polled.optJSONObject("command") ?: continue
@@ -353,12 +501,13 @@ class DeviceWorkerService : Service(), DeviceWorker {
                 val cached = ledger.cached(id)
                 if (cached != null) {
                     val value = JSONObject(cached)
+                    if (!sameConnection()) continue
                     if (value.optJSONObject("data")?.optBoolean("acknowledged") == true) {
                         stage = WorkerLoopDiagnostic.Stage.CACHED_RESULT_POST
-                        try { gateway.request("POST", "/devices/$device/results", value) } finally { stopWithReason("已确认命令被重复派发，已暂停") }
+                        try { connection.request("POST", "/devices/$device/results", value) } finally { stopWithReason("已确认命令被重复派发，已暂停") }
                     } else {
                         stage = WorkerLoopDiagnostic.Stage.CACHED_RESULT_POST
-                        gateway.request("POST", "/devices/$device/results", value)
+                        connection.request("POST", "/devices/$device/results", value)
                         stage = WorkerLoopDiagnostic.Stage.RESULT_ACK
                         if (!results.acknowledge(id)) stopWithReason("本机结果清理失败，已暂停")
                     }
@@ -367,12 +516,16 @@ class DeviceWorkerService : Service(), DeviceWorker {
                 stage = WorkerLoopDiagnostic.Stage.COMMAND_STATE
                 val runId = command.getString("run_id")
                 stage = WorkerLoopDiagnostic.Stage.COMMAND_RUN_POLL
-                val run = gateway.request("GET", "/runs/$runId")
+                val run = connection.request("GET", "/runs/$runId")
                 stage = WorkerLoopDiagnostic.Stage.COMMAND_STATE
-                if (paused || !alive || !TaskControl.isCurrent(generation) || run.optString("id") != runId || run.optString("status") != "running") continue
+                if (paused || !sameConnection() || run.optString("id") != runId || run.optString("status") != "running" ||
+                    gateway.prefs.getString("active_run", "") != runId) continue
+                // Task authority comes from stored run state, never from a model's command fields.
+                command.put("mode", run.optString("mode"))
                 // A visible companion/voice Activity owns the foreground until dismissed.
                 if (TaskPanelActivity.isVisible || VoiceActivity.isVisible) { Thread.sleep(200); continue }
-                gateway.prefs.edit().putString("active_run", runId).apply()
+                lastRun = run
+                if (!connection.direct) observeCompanionRun(connection.scope, run)
                 val uncertain = JSONObject().put("command_id", id).put("run_id", runId).put("status", "error").put("message", "执行曾中断，结果不确定；禁止自动重放").put("data", JSONObject())
                 stage = WorkerLoopDiagnostic.Stage.LEDGER_CLAIM
                 if (!ledger.claim(id, uncertain.toString())) { stopWithReason("命令记录失败，已暂停"); continue }
@@ -380,15 +533,16 @@ class DeviceWorkerService : Service(), DeviceWorker {
                     stage = WorkerLoopDiagnostic.Stage.ACTION_STATUS
                     update(when (command.optString("kind")) { "observe", "screenshot" -> "正在查看屏幕"; "visual_gesture" -> command.optJSONObject("gesture")?.optString("label")?.take(32)?.let { "正在操作：$it" } ?: "正在操作画面"; "tap" -> "正在点击"; "long_press" -> "正在长按"; "scroll" -> "正在滑动"; "type" -> "正在输入"; "launch" -> "正在打开应用"; else -> "正在执行" })
                     stage = WorkerLoopDiagnostic.Stage.ACTION_EXECUTE
-                    DoppelAccessibilityService.instance?.execute(command) ?: uncertain.put("message", "无障碍服务未启用")
+                    DoppelAccessibilityService.instance?.execute(command, generation) {
+                        alive && !paused && gateway.prefs.getString("active_run", "") == runId
+                    } ?: uncertain.put("message", "无障碍服务未启用")
                 }
                 stage = WorkerLoopDiagnostic.Stage.LEDGER_FINISH
                 if (!ledger.finish(id, result.toString())) { stopWithReason("结果保存失败，已暂停"); continue }
                 // Keep the accepted receipt; a local password prompt must not wake another model request.
-                AutomaticUnlockSession.awaitHandoff { alive && TaskControl.isCurrent(generation) }
-                if (!alive) continue
+                if (!AutomaticUnlockSession.awaitHandoff(::sameConnection) || !sameConnection()) continue
                 stage = WorkerLoopDiagnostic.Stage.RESULT_POST
-                gateway.request("POST", "/devices/$device/results", result)
+                connection.request("POST", "/devices/$device/results", result)
                 // Capture the executor's reason before stopping the polling loop.
                 stage = WorkerLoopDiagnostic.Stage.RESULT_TAKEOVER
                 pauseForTakeover(result)
@@ -411,6 +565,7 @@ class DeviceWorkerService : Service(), DeviceWorker {
         android.util.Log.e("DoppelWorkerLoop", WorkerLoopDiagnostic.describe(stage, error))
     }
     override fun onDestroy() {
+        if (::taskQueue.isInitialized) taskQueue.close()
         AutomaticUnlockSession.interrupted()
         runCatching { DirectRuntime.interrupt(this, "设备服务已停止") }
         TaskControl.invalidate()
@@ -426,7 +581,7 @@ internal object WorkerLoopDiagnostic {
     const val NETWORK_RECOVERY = "连接中断，等待重连"
     const val SERVICE_RECOVERY = "执行服务短暂异常，等待恢复"
     enum class Stage(val networkRequest: Boolean = false) {
-        RESULT_STORE, SCHEDULE_TICK, CLEANUP_POLL(true), CLEANUP_LOCAL, CLEANUP_ACK(true), CONTROL_STATE,
+        RESULT_STORE, SCHEDULE_TICK, QUEUE_POLL(true), CLEANUP_POLL(true), CLEANUP_LOCAL, CLEANUP_ACK(true), CONTROL_STATE,
         ACTIVE_RUN_POLL(true), ACTIVE_RUN_STATE, ACTIVE_OVERLAY, ACTIVE_FEEDBACK, ACTIVE_TOUCH_GUARD,
         ACTIVE_PAUSE, ACTIVE_COMPLETION, COMMAND_POLL(true), COMMAND_STATE, LEDGER_READ,
         CACHED_RESULT_POST(true), RESULT_ACK, COMMAND_RUN_POLL(true), LEDGER_CLAIM, ACTION_STATUS,

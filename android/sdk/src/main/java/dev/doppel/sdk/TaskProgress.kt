@@ -63,19 +63,21 @@ internal object TaskProgress {
         val stages = progress?.getJSONArray("plan")?.let { p -> (0 until p.length()).map(p::getString) }.orEmpty()
         val status = run?.optString("status").orEmpty()
         val done = status == "completed"
-        val running = status in setOf("running", "queued")
+        val running = status == "running"
         val known = stages.isNotEmpty() && (done || progress?.optBoolean("total_known") == true)
         val reported = progress?.optInt("completed") ?: 0
         // A model can claim every stage early. Keep the final stage pending until verified finish.
         val completed = if (done) stages.size else if (known) reported.coerceAtMost((stages.size - 1).coerceAtLeast(0)) else reported
         val current = when {
             done -> "任务已完成"
+            status == "queued" -> "前面的任务结束后自动执行"
             stages.isEmpty() -> if (running) "正在确定任务阶段" else "暂无阶段计划"
             reported >= stages.size -> if (known) "正在确认任务结果" else "正在确定后续阶段"
             else -> stages[reported]
         }
         val label = when {
             done -> if (stages.isEmpty()) "任务已完成" else "任务已完成 · ${stages.size}/${stages.size} 阶段"
+            status == "queued" -> TaskPresentation.queueLabel(requireNotNull(run))
             known -> "已完成 $completed/${stages.size} 阶段"
             else -> "进度待确定"
         }

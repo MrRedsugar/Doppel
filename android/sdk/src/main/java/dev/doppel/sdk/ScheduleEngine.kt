@@ -5,9 +5,11 @@ import org.json.JSONObject
 import java.util.UUID
 
 interface SchedulePort {
-    /** Null means current host/device authorizes trying to create a new task. */
+    /** Null means admission is allowed; device execution readiness is checked at the FIFO head. */
     fun readiness(job: JSONObject): String?
+    /** Repeating the same request_id must return the original run. */
     fun create(job: JSONObject): String
+    /** Wake the queue after admission; does not itself start this run. */
     fun start(runId: String)
     /** "missing" means a definitively unavailable record; null or failure leaves its outcome unknown. */
     fun status(runId: String): String?
@@ -30,7 +32,7 @@ class ScheduleEngine(state: String?, private val save: (String) -> Unit,
             for (job in jobs.toList()) {
                 val copy = JSONObject(job.toString()); val history = copy.getJSONArray("history"); var changed = false
                 require(history.length() <= 100); ScheduleRule.parse(copy.getJSONObject("rule"))
-                for (i in 0 until history.length()) if (history.getJSONObject(i).optString("status") == "dispatching") {
+                for (i in 0 until history.length()) if (history.getJSONObject(i).optString("status") == "dispatching" && !history.getJSONObject(i).has("request")) {
                     history.getJSONObject(i).put("status", "uncertain").put("reason", "host_restarted_during_dispatch"); changed = true
                 }
                 if (changed) { copy.put("enabled", false).put("next_due_ms", JSONObject.NULL).put("waiting_reason", "review_uncertain_dispatch"); persist(copy) }
@@ -104,7 +106,13 @@ class ScheduleEngine(state: String?, private val save: (String) -> Unit,
         }
         persist(job); return JSONObject(job.toString())
     }
-    fun nextDue(): Long? = jobs.filter { it.getBoolean("enabled") && !it.isNull("next_due_ms") }.minOfOrNull { it.getLong("next_due_ms") }
+    fun nextDue(): Long? = jobs.flatMap { job ->
+        val due = if (job.getBoolean("enabled") && !job.isNull("next_due_ms")) listOf(job.getLong("next_due_ms")) else emptyList()
+        val history = job.getJSONArray("history")
+        due + (0 until history.length()).mapNotNull { i -> history.getJSONObject(i).takeIf {
+            it.optString("status") == "dispatching" && it.has("request")
+        }?.getLong("scheduled_at_ms") }
+    }.minOrNull()
     /** Remove only this occurrence's manual approval after an immediate attempt could not start. */
     @Synchronized internal fun clearManualDecision(id: String, due: Long) {
         val job = get(id)
@@ -116,22 +124,31 @@ class ScheduleEngine(state: String?, private val save: (String) -> Unit,
         val now = clock()
         for (original in jobs.toList().filter { onlyId == null || it.optString("id") == onlyId }.sortedBy { it.optLong("next_due_ms", Long.MAX_VALUE) }) {
             val job = get(original.getString("id")); val history = job.getJSONArray("history"); var changed = false
-            if ((0 until history.length()).any { history.getJSONObject(it).optString("status") == "dispatching" }) {
-                // A previous write may have failed after run creation. Quarantine even without restart.
-                for (i in 0 until history.length()) if (history.getJSONObject(i).optString("status") == "dispatching")
-                    history.getJSONObject(i).put("status", "uncertain").put("reason", "dispatch_unconfirmed")
+            val pending = (0 until history.length()).map { history.getJSONObject(it) }.filter { it.optString("status") == "dispatching" }
+            if (pending.any { !it.has("request") }) {
+                // Legacy claims have no idempotency key; their unknown outcome cannot be replayed.
+                pending.forEach { it.put("status", "uncertain").put("reason", "dispatch_unconfirmed") }
                 persist(job.put("enabled", false).put("next_due_ms", JSONObject.NULL).put("waiting_reason", "review_uncertain_dispatch"))
+                continue
+            }
+            if (pending.isNotEmpty()) {
+                for (entry in pending) admit(job, entry, port)
+                // Retry only the claimed occurrence in this tick, preserving chronological admission.
                 continue
             }
             val currentBinding = binding()
             for (i in 0 until history.length()) {
                 if (binding() != currentBinding) break
                 val entry = history.getJSONObject(i)
-                if (entry.optString("status") == "started" && !entry.isNull("run_id") &&
+                if (entry.optString("status") in setOf("queued", "started", "paused", "awaiting_input", "awaiting_approval") && !entry.isNull("run_id") &&
                     entry.optString("binding", job.getString("binding")) == currentBinding) {
                     val status = runCatching { port.status(entry.getString("run_id")) }.getOrNull()
                     if (binding() != currentBinding) break
                     if (status in terminal) { entry.put("status", status).put("finished_at_ms", now); changed = true }
+                    else if (status in setOf("queued", "running", "paused", "awaiting_input", "awaiting_approval")) {
+                        val recorded = if (status == "running") "started" else status
+                        if (entry.optString("status") != recorded) { entry.put("status", recorded); changed = true }
+                    }
                     else if (status == "missing") {
                         entry.put("status", "unavailable").put("reason", "run_missing").put("checked_at_ms", clock())
                         changed = true
@@ -147,19 +164,35 @@ class ScheduleEngine(state: String?, private val save: (String) -> Unit,
             val entry = JSONObject().put("scheduled_at_ms", due).put("at_ms", now).put("status", if (missed) "missed" else "dispatching")
                 .put("run_id", JSONObject.NULL).put("binding", currentBinding)
             if (missed) entry.put("reason", job.optString("waiting_reason").takeIf { it.isNotBlank() && it != "null" } ?: "host_unavailable_at_due_time")
+            else entry.put("request", JSONObject(job.toString()).apply {
+                remove("history")
+                put("request_id", TaskSubmissionKey.create(due, "schedule:${job.getString("id")}"))
+            })
             history.put(entry); while (history.length() > 100) history.remove(0)
             val next = ScheduleRule.parse(job.getJSONObject("rule")).nextAfter(now)
             job.put("next_due_ms", next ?: JSONObject.NULL).put("enabled", next != null).put("waiting_reason", JSONObject.NULL)
-            persist(job) // Irrevocable occurrence claim. Unknown results are never automatic retries.
+            persist(job) // Claim before network work; request_id makes admission retries safe.
             if (missed) continue
-            try {
-                val runId = port.create(JSONObject(job.toString())); require(runId.isNotBlank())
-                entry.put("status", "started").put("run_id", runId); persist(job)
-                port.start(runId)
-            } catch (_: Exception) {
-                entry.put("status", "uncertain").put("reason", "dispatch_unconfirmed")
-                job.put("enabled", false).put("next_due_ms", JSONObject.NULL).put("waiting_reason", "review_uncertain_dispatch"); persist(job)
-            } finally { port.finishDispatch() }
+            admit(job, entry, port)
         }
+    }
+
+    /** Durable request snapshot bridges schedule and run stores without ever replaying execution. */
+    private fun admit(job: JSONObject, entry: JSONObject, port: SchedulePort) {
+        val request = entry.getJSONObject("request")
+        val reason = if (request.getString("binding") != binding()) "connection_changed" else port.readiness(JSONObject(request.toString()))
+        if (reason != null) { persist(job.put("waiting_reason", reason)); return }
+        try {
+            val runId = port.create(JSONObject(request.toString())); require(runId.isNotBlank())
+            entry.put("status", "queued").put("run_id", runId).remove("request")
+            job.put("waiting_reason", JSONObject.NULL)
+            persist(job)
+            // The record is already safely admitted; a wake failure must not revert it to unknown.
+            runCatching { port.start(runId) }
+        } catch (_: Exception) {
+            // Restore the original key even if the second store write failed after successful create.
+            entry.put("status", "dispatching").put("request", request).put("run_id", JSONObject.NULL)
+            persist(job.put("waiting_reason", "queue_submission_retry"))
+        } finally { port.finishDispatch() }
     }
 }
