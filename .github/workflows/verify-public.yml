@@ -34,7 +34,7 @@ jobs:
         run: python -m pip install build && python -m build framework
 
   android:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -44,9 +44,9 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-      - uses: android-actions/setup-android@v3
       - name: Install Android SDK Components
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+        # Hosted Ubuntu already includes the SDK and accepted licenses.
+        run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"'
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
